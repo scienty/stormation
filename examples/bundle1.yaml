@@ -1,0 +1,42 @@
+config:
+    bundle_name: bundle1
+    aws_region: us-west-2
+    aws_account: ######18623
+    aws_profile: my-us-west2
+
+    deployment_type: cluster1
+    deployment_size: small
+    environment: test
+    owner: prakash
+    key_name: my-aws-private-key
+    vpc_cidr: 10.0.0.0/16
+    mgmt_subnet_blocks: [10.0.1.0/24]
+    public_subnet_blocks: [10.0.11.0/24,10.0.12.0/24]
+    private_subnet_blocks: [10.0.21.0/24,10.0.22.0/24]
+    availability_zones: [us-west-2a, us-west-2b]
+    nat_gw_count: 1
+    home_networks: [1.1.1.1/24, 2.2.2.2/24]
+
+    tags:
+      author: prakash
+
+stacks:
+  iam:
+      enabled: true
+      template: iam.yaml
+
+  network:
+    enabled: true
+    template: network.yaml
+    aws_region: us-west-2
+    dependson: [iam]
+
+    parameters:
+      KeyName: $config.key_name
+      VPCSubnetBlock: $config.vpc_cidr
+      PublicSubnetBlocks: $config.public_subnet_blocks
+      PrivateSubnetBlocks: $config.private_subnet_blocks
+
+    tags:
+      environment: dev
+

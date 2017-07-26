@@ -1,0 +1,202 @@
+
+---
+
+vpc_cidr: {{config.vpc_cidr}}
+igw: true
+
+subnets:
+    Mgmt:
+      cidr_blocks: $config.mgmt_subnet_blocks
+      availability_zones: $config.availability_zones
+      default_route: internet
+      acl:
+        - {action: allow, direction: [ingress,egress],   protocol: [TCP,UDP], ports: 1024-65535, cidr: 0.0.0.0/0}
+        - {action: allow, direction: ingress,  protocol: TCP, cidr: $config.home_networks, ports: 22}
+        - {action: allow, direction: [ingress,egress],   protocol: UDP, cidr: 0.0.0.0, ports: 123}
+        - {action: allow, direction: egress,    protocol: TCP, cidr: $config.vpc_cidr, ports: 22}
+      routes:
+        - { cidr: 0.0.0.0/0, gateway: igw }
+
+    Public:
+      cidr_blocks: {{config.public_subnet_blocks}}
+      availability_zones: $config.availability_zones
+      nat_gw_count: $config.nat_gw_count
+      default_route: internet
+      acl:
+        - {action: allow, direction: [ingress,egress],   protocol: [TCP,UDP], ports: 1024-65535, cidr: 0.0.0.0/0}
+        - {action: allow, direction: ingress,  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: 22}
+        - {action: allow, direction: [ingress,egress],  protocol: TCP, cidr: 0.0.0.0/0, ports: [80,443]}
+      routes:
+        - { cidr: 0.0.0.0/0, gateway: igw }
+
+    Private:
+      cidr_blocks: $config.private_subnet_blocks[0]
+      availability_zones: $config.availability_zones
+      default_route: nat_gw
+      acl:
+        - {action: allow, direction: [ingress,egress],   protocol: [TCP,UDP], ports: 1024-65535, cidr: 0.0.0.0/0}
+        - {action: allow, direction: ingress,  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: 22}
+        - {action: allow, direction: [ingress,egress],  protocol: TCP, cidr: $config.public_subnet_blocks, ports: [80,443]}
+        - {action: allow, direction: [ingress,egress],  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: [80,443]}
+      routes:
+        - { cidr: 0.0.0.0/0, nat_gateway: nat_gw,  }
+
+---
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create VPC and InternetGateway and a public subnet
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: {{ vpc_cidr }}
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      InstanceTenancy: default
+      Tags:
+      - Key: Name
+        Value: !Ref 'AWS::StackName'
+  {%- if igw|default(False) %}
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Ref 'AWS::StackName'
+  VPCGatewayAttachment:
+    DependsOn:
+    - VPC
+    - InternetGateway
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref 'VPC'
+      InternetGatewayId: !Ref 'InternetGateway'
+  {% endif %}
+  
+  {% for subnet_def_name in subnets.keys() %}
+    {% set subnet_loop = loop %}
+    {% set subnet_suffix = "%s%s"|format(subnet_def_name,subnet_loop.index0) %}
+    {% set subnet_def = subnets[subnet_def_name] %}
+    {% set cidr_blocks = subnet_def['cidr_blocks'] %}
+    {% set availability_zones = subnet_def['availability_zones'] %}
+    {% set acl = subnet_def['acl'] %}
+    {% set routes = subnet_def['routes'] %}
+    {% set default_route = subnet_def['default_route']|default('None') %}
+    {% set nat_gw_count = subnet_def['nat_gw_count']|default(0) %}
+    {% set nat_gws = [] %}
+    {% for cidr_block in cidr_blocks %}
+        {% set availability_zone = availability_zones[(loop.index0)%(availability_zones|length)] %}
+  
+  Subnet{{subnet_suffix}}:
+    DependsOn:
+    - VPC
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref 'VPC'
+      CidrBlock: {{cidr_block}}
+      AvailabilityZone: {{ availability_zone }}
+      Tags:
+      - Key: Name
+        Value: !Join ['-', [!Ref 'AWS::StackName', {{subnet_suffix}}]]
+        {% if nat_gws|length < nat_gw_count %}
+        {% set __ = nat_gws.append('NATGateway'+subnet_suffix) %}
+  EIPNat{{subnet_suffix}}:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NATGateway{{subnet_suffix}}:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt [EIPNat{{subnet_suffix}}, AllocationId]
+      SubnetId: !Ref 'Subnet{{subnet_suffix}}'
+        {% endif %}
+  RouteTable{{subnet_suffix}}:
+    DependsOn:
+    - VPC
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref 'VPC'
+      Tags:
+      - Key: Name
+        Value: !Join ['-', [!Ref 'AWS::StackName', {{subnet_suffix}}]]
+  RouteTableAssociation{{subnet_suffix}}:
+    DependsOn:
+    - Subnet{{subnet_suffix}}
+    - RouteTable{{subnet_suffix}}
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref 'Subnet{{subnet_suffix}}'
+      RouteTableId: !Ref 'RouteTable{{subnet_suffix}}'
+        {% if default_route %}
+  Route{{subnet_suffix}}:
+    DependsOn:
+    - RouteTable{{subnet_suffix}}
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref 'RouteTable{{subnet_suffix}}'
+      DestinationCidrBlock: 0.0.0.0/0
+            {% if default_route == 'internet' %}
+      GatewayId: !Ref 'InternetGateway'
+            {% endif %}
+            {% if default_route ==  'nat_gw' %}
+      NATGatewayId: !Ref 'nat_gws[loop.index0%nat_gws|length]'
+            {% endif %}
+        {% endif %}
+  NetworkAcl{{subnet_suffix}}:
+    DependsOn:
+    - VPC
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref 'VPC'
+      Tags:
+      - Key: Name
+        Value: !Join ['-', [!Ref 'AWS::StackName', {{subnet_suffix}}]]
+  AclAssociationSubnet{{subnet_suffix}}:
+    DependsOn:
+    - Subnet{{subnet_suffix}}
+    - NetworkAcl{{subnet_suffix}}
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref 'Subnet{{subnet_suffix}}'
+      NetworkAclId: !Ref 'NetworkAcl{{subnet_suffix}}' 
+        {% for acl_entry in acl %}
+  NetworkAclEntry{{subnet_suffix}}{{loop.index0}}:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref 'NetworkAcl{{subnet_suffix}}'
+      RuleNumber: {{100+(loop.index0*5)}}
+      Protocol: '{{acl_entry.protocol_num}}'
+      RuleAction: {{acl_entry.action}}
+      Egress: '{{acl_entry.egress}}'
+      CidrBlock: {{acl_entry.cidr}}
+      {%if acl_entry.v6cidr|default(False) -%}
+      Ipv6CidrBlock: {{acl_entry.v6cidr}}
+      {%- endif %}
+      PortRange:
+        From: '{{acl_entry.port_from}}'
+        To: '{{acl_entry.port_to}}'
+        {% endfor %}
+  
+    {% endfor %}
+  {% endfor %}
+  
+      
+  
+Outputs:
+  VPC:
+    Description: ID of the VPC
+    Value: !Ref 'VPC'
+  InternetGateway:
+    Description: ID of the InternetGateway
+    Value: !Ref 'InternetGateway'
+  NATGateways:
+    Description: List of the NATGateway IDs
+    Value: !Ref 'NATGateway1'
+  SubnetsPublic:
+    Description: List of the SubnetPublic IDs
+    Value: !Join [',', [!Ref 'SubnetPublic1', !Ref 'SubnetPublic2']]
+  SubnetsPrivate:
+    Description: List of the PrivagteSubnet IDs
+    Value: !Join [',', [!Ref 'SubnetPrivate1', !Ref 'SubnetPrivate2']]
