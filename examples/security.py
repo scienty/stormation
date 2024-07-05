@@ -120,10 +120,14 @@ def process_seurity_group_rule(rule):
     securityGroup = rule.get('securityGroup', None)
     securityGroupOwner = rule.get('securityGroupOwner', None)
 
+    hashKey = ""
+
     if cidr is not None:
         rule['cidr'] = cidr
+        hashKey = cidr
     elif v6cidr is not None:
         rule['v6cidr'] = v6cidr
+        hashKey += v6cidr
     elif prefixList is not None:
         rule['prefixList'] = prefixList
     elif securityGroup is not None:
@@ -136,6 +140,7 @@ def process_seurity_group_rule(rule):
     port_range = rule.get('ports', None)
     if port_range is None:
         raise Exception('ports missing for security group rule %s' % rule)
+    hashKey += str(port_range)
 
     ports = str(port_range).split('-')
     from_port = None
@@ -164,10 +169,15 @@ def process_seurity_group_rule(rule):
         raise Exception('Invalid protocol %s, valid entries are %s' % (rule, protocol_map.keys()))
 
     rule['protocol_num'] = proto_num
+    hashKey += str(proto_num)
 
     direction = rule.get('direction', None)
     if direction is None or direction.lower() not in ['ingress', 'egress']:
         raise Exception('Invalid direction for rule entry %s' % rule)
+
+    rule['id'] = '{:X}'.format(hash(hashKey))
+    if rule['id'].startswith("-"):
+        rule['id'] = rule['id'].lstrip("-")
 
 
 if __name__ == "__main__":

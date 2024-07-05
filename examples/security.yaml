@@ -65,7 +65,7 @@ Resources:
       GroupName: !Join [ "", [ !Ref "AWS::StackName", "{{security_group_name}}" ] ]
   
       {%- for rule in ingress_rules %}
-  SecurityGroup{{security_group_name}}Ingress:
+  SecurityGroup{{security_group_name}}Ingress{{rule['id']}}:
     DependsOn:
       - SecurityGroup{{security_group_name}}
     Type: 'AWS::EC2::SecurityGroupIngress'
@@ -95,7 +95,7 @@ Resources:
       {%- endfor %}
           
       {%- for rule in egress_rules %}
-  SecurityGroup{{security_group_name}}Egress:
+  SecurityGroup{{security_group_name}}Egress{{rule['id']}}:
     DependsOn:
       - SecurityGroup{{security_group_name}}
     Type: 'AWS::EC2::SecurityGroupEgress'
