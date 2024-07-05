@@ -1,0 +1,136 @@
+---
+vpc_id: $Network.Outputs.VPC
+key_pair_names: $config.key_pair_names
+
+#TODO: we can create prefix list for each subnet type in network.yaml
+security_groups:
+  bastion:
+    description: Bastion security group
+    rules:
+      # cidr, cidrv6, prefixList, securityGroup are exclusive and the meaning changes based on direction, this list is flattened and expanded by plugin security.py
+      # { direction: ingress|egress, protocol: tcp|udp|icmp|icmpv6|All, ports: 80-90|All, cidr: 0.0.0.0/0, v6cidr: xxx:10, prefixList: abc, securityGroup: abc, securityGroupOwner: 1234}
+      - { direction: ingress,  protocol: tcp, ports: 22, cidr: 0.0.0.0/0, description: "SSH to bastion" }
+      - { direction: egress,  protocol: tcp, ports: 1024-65535, cidr: 0.0.0.0/0, description: "Allow return traffic" }
+      - { direction: ingress,  protocol: udp, ports: 123, cidr: 0.0.0.0/0, description: "Allow NTP sync" }
+  elb:
+    description: Security group for ELB to allow HTTP traffic
+    rules:
+      - { direction: ingress,  protocol: tcp, ports: 80, cidr: 0.0.0.0/0, description: "Allow public web" }
+      - { direction: ingress,  protocol: tcp, ports: 443, cidr: 0.0.0.0/0, description: "Allow public web" }
+
+  webServer:
+    description: Allow host in public subnet to receive traffic from http and bastion
+    rules:
+      - { direction: ingress,  protocol: tcp, ports: 80, securityGroup: elb, description: "Allow public web" }
+      - { direction: ingress,  protocol: tcp, ports: 443, securityGroup: elb, description: "Allow public web" }
+      - { direction: ingress,  protocol: tcp, ports: 22, securityGroup: bastion, description: "Allow SSH from bastion" }
+      - { direction: egress,  protocol: tcp, ports: 1024-65535, cidr: 0.0.0.0/0, description: "Allow return traffic" }
+  private:
+    description: Security group for communication within private subnet
+    rules:
+      - { direction: ingress,  protocol: All, ports: All, securityGroup: private, description: "Allow all within private subnet" }
+      - { direction: ingress,  protocol: TCP, ports: 1-1023, securityGroup: webServer, description: "Allow application traffic from webserver" }
+      - { direction: ingress,  protocol: UDP, ports: 1-1023, securityGroup: webServer, description: "Allow application traffic from webserver" }
+      - { direction: ingress,  protocol: tcp, ports: 22, securityGroup: bastion, description: "Allow SSH from bastion" }
+      - { direction: egress,  protocol: tcp, ports: 1024-65535, securityGroup: webServer, description: "Allow return public subnet" }
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create required key pairs and security groups
+
+Resources:
+  {%- set fq_key_pair_names = [] %}
+  {%- for key_pair_name in key_pair_names %}
+    {%- set fq_key_pair_name = "%s_%s"|format(stack_name,key_pair_name) %}
+    {%- set pub_key_material = context.get(key_pair_name+"_public_key") %}
+  KeyPair{{key_pair_name}}:
+    Type: 'AWS::EC2::KeyPair'
+    Properties:
+      KeyName: {{fq_key_pair_name}}
+      PublicKeyMaterial: '{{pub_key_material}}'
+      Tags:
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+  {%- endfor %}
+
+  {%- for security_group_name in security_groups.keys() %}
+    {%- set description = security_groups[security_group_name]['description']|default(security_group_name) %}
+    {%- set security_group = security_groups[security_group_name] %}
+    {%- set ingress_rules = security_group['rules']['ingress'] %}
+    {%- set egress_rules = security_group['rules']['egress'] %}
+  SecurityGroup{{security_group_name}}:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Bastion Host Security Group
+      VpcId: {{vpc_id}}
+      GroupName: !Join [ "", [ !Ref "AWS::StackName", "{{security_group_name}}" ] ]
+  
+      {%- for rule in ingress_rules %}
+  SecurityGroup{{security_group_name}}Ingress:
+    DependsOn:
+      - SecurityGroup{{security_group_name}}
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+        {%- if rule['cidr'] is defined %}
+      CidrIp: '{{rule["cidr"]}}'
+        {%- elif rule['v6cidr'] is defined %}
+      CidrIpv6: '{{rule["v6cidr"]}}'
+        {%- elif rule['prefixList'] is defined %}
+      SourcePrefixListId: '{{rule["prefixList"]}}'
+        {%- elif rule['securityGroup'] is defined %}
+          {%- if security_groups[rule["securityGroup"]] is defined %}
+      SourceSecurityGroupId: !Ref 'SecurityGroup{{rule["securityGroup"]}}'
+          {%- else %}
+      SourceSecurityGroupId: '{{rule["securityGroup"]}}'    
+          {%- endif %}
+        {%- else %}
+      SourceSecurityGroupOwnerId: '{{rule["securityGroupOwner"]}}'
+        {%- endif %}
+      FromPort: '{{rule["from_port"]}}'
+      ToPort: '{{rule["to_port"]}}'
+      GroupId: !Ref 'SecurityGroup{{security_group_name}}'
+      IpProtocol: '{{rule['protocol_num']}}'
+        {%- if rule['description'] is defined %}
+      Description: '{{rule['description']}}'
+        {%- endif %}
+      {%- endfor %}
+          
+      {%- for rule in egress_rules %}
+  SecurityGroup{{security_group_name}}Egress:
+    DependsOn:
+      - SecurityGroup{{security_group_name}}
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+        {%- if rule['cidr'] is defined %}
+      CidrIp: '{{rule["cidr"]}}'
+        {%- elif rule['v6cidr'] is defined %}
+      CidrIpv6: '{{rule["v6cidr"]}}'
+        {%- elif rule['prefixList'] is defined %}
+      DestinationPrefixListId: '{{rule["prefixList"]}}'
+        {%- elif rule['securityGroup'] is defined %}
+          {%- if security_groups[rule["securityGroup"]] is defined %}
+      DestinationSecurityGroupId: !Ref 'SecurityGroup{{rule["securityGroup"]}}'
+          {%- else %}
+      DestinationSecurityGroupId: '{{rule["securityGroup"]}}'    
+          {%- endif %}
+        {%- endif %}
+      FromPort: '{{rule["from_port"]}}'
+      ToPort: '{{rule["to_port"]}}'
+      GroupId: !Ref 'SecurityGroup{{security_group_name}}'
+      IpProtocol: '{{rule['protocol_num']}}'
+        {%- if rule['description'] is defined %}
+      Description: '{{rule['description']}}'
+        {%- endif %}
+      {%- endfor %}
+  {%- endfor %}
+Outputs:
+{%- for key_pair_name in key_pair_names %}
+  {%- set fq_key_pair_name = "%s_%s"|format(stack_name,key_pair_name) %}
+  KeyPair{{key_pair_name}}:
+    Description: Key pair for {{key_pair_name}}
+    Value: {{fq_key_pair_name}}
+{%- endfor %}
+{%- for security_group_name in security_groups %}
+  SecurityGroup{{security_group_name}}:
+    Description: Security Group for {{security_group_name}}
+    Value: !Ref 'SecurityGroup{{security_group_name}}'
+{%- endfor %}

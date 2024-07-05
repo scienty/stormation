@@ -23,8 +23,10 @@ import time
 import yaml
 import pystache
 import os
-from cfn_stack import CFNStack, CFNStackData
-from cfn_client import StackFailStatus, StackSuccessStatus
+from pathlib import Path
+from cfn.cfn_stack import CFNStack, CFNStackData
+from cfn.cfn_client import StackFailStatus, StackSuccessStatus
+from common import s3bucket
 
 class CFBundle(object):
     """
@@ -38,13 +40,16 @@ class CFBundle(object):
         self.stack_map = dict()
         self.dependency_map = dict()
 
-        file_handle = open(yaml_file, 'r')
+        file = Path(yaml_file).resolve()
+        self.path = file.parent
+
+        file_handle = open(file, 'r')
         rendered_file = pystache.render(file_handle.read(), dict(os.environ))
         self.input = yaml.safe_load(rendered_file)
         self.config = self.input.get('config', {})
         self.tags = self.config.get('tags', {})
 
-        self.name = self.config.get('bundle_name', 'bundle')
+        self.name = self.sanitize_name(self.config.get('bundle_name', 'bundle'))
         self.aws_region = self.config.get('aws_region', None)
 
         self.aws_profile = kwargs.get('aws_profile', self.config.get('aws_profile', None))
@@ -56,14 +61,17 @@ class CFBundle(object):
         for stack_key in input_stacks.keys():
             stack_def = input_stacks[stack_key];
 
-            stack_name = stack_def.get('name', "%s-%s" % (self.name, stack_key))
+            stack_name = stack_def.get('name', "%s%s" % (self.name, stack_key))
+            stack_name = self.sanitize_name(stack_name)
             stack_region = stack_def.get('aws_region', self.aws_region)
 
             if stack_def.get('enabled', True):
-                stack_template = stack_def['template']
+                template = stack_def['template']
+                if not Path(template).is_absolute():
+                    stack_template=Path(self.path,  Path(template))
 
-                stack_params = stack_def.get('parameters', {})
-                stack_tags = dict(self.tags.items() + stack_def.get('tags', {}).items())
+                stack_params = stack_def.get('parameters', dict())
+                stack_tags = self.tags | stack_def.get('tags', dict())
                 stack_deps = stack_def.get('dependson', [])
 
                 cf_stack = CFNStackData(key=stack_key,
@@ -95,6 +103,23 @@ class CFBundle(object):
                 stack.add_dependency(dep_stack)
 
         self.stacks = self.sort_stacks()
+        s3bucket.init(self.name+ "CFTemplates")
+
+    def sanitize_name(self, name, delimiter=None):
+        if delimiter is None:
+            name = self.sanitize_name(name, "_")
+            name = self.sanitize_name(name, "-")
+            name = self.sanitize_name(name, ".")
+            return name
+        else:
+            parts = name.split(delimiter)
+            if(len(parts) > 1):
+                for i in range(len(parts)):
+                    parts[i] = parts[i].title()
+                return "".join(parts)
+            else:
+                return name
+
 
     def sort_stacks(self):
         """
@@ -121,7 +146,7 @@ class CFBundle(object):
         while len(no_deps) > 0:
             stack = no_deps.pop()
             sorted_stacks.append(stack)
-            for node in dep_graph.keys():
+            for node in list(dep_graph.keys()):
                 for dep_name in dep_graph[node]:
                     if stack.key == dep_name:
                         dep_graph[node].remove(dep_name)
@@ -135,6 +160,11 @@ class CFBundle(object):
             exit(1)
         else:
             return sorted_stacks
+
+    def create_update_bundle(self):
+        for stack in self.stacks:
+            if stack.enabled:
+                stack.create_update_stack()
 
     def check(self, stack_name=None):
         stack = self.stack_map[stack_name]
@@ -162,38 +192,38 @@ class CFBundle(object):
                                          % stack.name)
                 exit(1)
 
-                stack.read_template()
-                self.logger.info("Creating: %s, %s" % (
-                    stack.cf_stack_name, stack.get_params_tuples()))
-                try:
-                    self.cfconn.create_stack(
-                        stack_name=stack.cf_stack_name,
-                        template_body=stack.template_body,
-                        parameters=stack.get_params_tuples(),
-                        capabilities=['CAPABILITY_IAM'],
-                        notification_arns=stack.sns_topic_arn,
-                        tags=stack.tags
-                    )
-                except Exception as exception:
-                    self.logger.critical(
-                        "Creating stack %s failed. Error: %s" % (
-                            stack.cf_stack_name, exception))
-                    exit(1)
+            stack.read_template()
+            self.logger.info("Creating: %s, %s" % (
+                stack.cf_stack_name, stack.get_params_tuples()))
+            try:
+                self.cfconn.create_stack(
+                    stack_name=stack.cf_stack_name,
+                    template_body=stack.template_body,
+                    parameters=stack.get_params_tuples(),
+                    capabilities=['CAPABILITY_IAM'],
+                    notification_arns=stack.sns_topic_arn,
+                    tags=stack.tags
+                )
+            except Exception as exception:
+                self.logger.critical(
+                    "Creating stack %s failed. Error: %s" % (
+                        stack.cf_stack_name, exception))
+                exit(1)
 
-                create_result = self.watch_events(
-                    stack.cf_stack_name, "CREATE_IN_PROGRESS")
-                if create_result != "CREATE_COMPLETE":
-                    self.logger.critical(
-                        "Stack didn't create correctly, status is now %s"
-                        % create_result)
-                    exit(1)
+            create_result = self.watch_events(
+                stack.cf_stack_name, "CREATE_IN_PROGRESS")
+            if create_result != "CREATE_COMPLETE":
+                self.logger.critical(
+                    "Stack didn't create correctly, status is now %s"
+                    % create_result)
+                exit(1)
 
-                # CF told us stack completed ok.
-                # Log message to that effect and refresh the list of stack
-                # objects in CF
-                self.logger.info("Finished creating stack: %s"
-                                 % stack.cf_stack_name)
-                self.cf_desc_stacks = self._describe_all_stacks()
+            # CF told us stack completed ok.
+            # Log message to that effect and refresh the list of stack
+            # objects in CF
+            self.logger.info("Finished creating stack: %s"
+                                % stack.cf_stack_name)
+            self.cf_desc_stacks = self._describe_all_stacks()
 
     def delete(self, stack_name=None, force=False):
         """

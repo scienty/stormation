@@ -27,7 +27,7 @@ protocol_map = {
 
 def init(stk):
     stack = stk
-    print "Initializing stack " + stack.name
+    print("Initializing stack " + stack.name)
 
 def prepare_context(context):
     subnets = context.get('subnets', {})

@@ -132,7 +132,7 @@ class CFNClient(object):
         """
         self.logger = logging.getLogger(__name__)
         self.region = region_stack_name
-        self.aws_client = AWSClient('cloudformation', region_stack_name=region_stack_name, **kwargs);
+        self.aws_client = AWSClient('cloudformation', region_name=region_stack_name, **kwargs)
         # map of StackInfo
         self.info = dict()
 
@@ -183,8 +183,8 @@ class CFNClient(object):
         return self.aws_client.call('describe_stack_events', query='StackEvents', StackName=stack_name)
         #return boto_all(self.conn.describe_stack_events, StackName=stack_name)
 
-    def validate(self, template_body):
-        return self.aws_client.call('validate_template', TemplateBody=template_body)
+    def validate(self, template_url):
+        return self.aws_client.call('validate_template', TemplateURL=template_url)
 
     def create_change_set(self, stack_name, template, parameters):
         params = self._convert_params(parameters)
@@ -199,12 +199,12 @@ class CFNClient(object):
     def list_change_sets(self, stack_name):
         return self.aws_client.call('list_change_sets', StackName=stack_name, query='Summaries')
 
-    def update_stack(self, stack_name, template, parameters):
+    def update_stack(self, stack_name, template_url, parameters):
         """
         Update CFN stack
         :param stack_name: stack stack_name
         :type stack_name: str
-        :param template: JSON encodeable object
+        :param template_url: url of the template
         :type template: str
         :param parameters: dictionary containing key value pairs as CFN parameters
         :type parameters: dict
@@ -215,7 +215,7 @@ class CFNClient(object):
         try:
             params = self._convert_params(parameters)
             #self.conn.update_stack(StackName=stack_name, TemplateBody=template, Parameters=params, Capabilities=['CAPABILITY_IAM'])
-            return self.aws_client.call('update_stack', StackName=stack_name, TemplateBody=template, Parameters=params, Capabilities=['CAPABILITY_IAM'])
+            return self.aws_client.call('update_stack', StackName=stack_name, TemplateURL=template_url, Parameters=params, Capabilities=['CAPABILITY_IAM'])
         except botocore.exceptions.ClientError as ex:
             if CFNClient._error_mesg(ex) == 'No updates are to be performed.':
                 # this is not really an error, but there aren't any updates.
@@ -225,12 +225,12 @@ class CFNClient(object):
         else:
             return True
 
-    def create_stack(self, stack_name, template, parameters):
+    def create_stack(self, stack_name, template_url, parameters):
         """
         Create CFN stack
         :param stack_name: stack stack_name
         :type stack_name: str
-        :param template: JSON encodeable object
+        :param template_url: url of the template
         :type template: str
         :param parameters: dictionary containing key value pairs as CFN parameters
         :type parameters: dict
@@ -240,9 +240,9 @@ class CFNClient(object):
             params = self._convert_params(parameters)
 
             #self.conn.create_stack(StackName=stack_name, TemplateBody=template, DisableRollback=True,Parameters=params, Capabilities=['CAPABILITY_IAM'])
-            return self.aws_client.call('create_stack', StackName=stack_name, TemplateBody=template, DisableRollback=True, Parameters=params, Capabilities=['CAPABILITY_IAM'])
+            return self.aws_client.call('create_stack', StackName=stack_name, TemplateURL=template_url, DisableRollback=True, Parameters=params, Capabilities=['CAPABILITY_IAM'])
         except botocore.exceptions.ClientError as ex:
-            raise CloudformationException('Error while creating stack %s: %s' % (stack_name, ex.message))
+            raise CloudformationException('Error while creating stack %s: %s' % (stack_name, ex))
 
     def delete_stack(self, stack_name):
         """
@@ -259,7 +259,7 @@ class CFNClient(object):
             #self.conn.delete_stack(StackName=stack_name)
             return self.aws_client.call('delete_stack', StackName=stack_name)
         except botocore.exceptions.ClientError as ex:
-            raise CloudformationException('Error while deleting stack %s: %s' % (stack_name, ex.message))
+            raise CloudformationException('Error while deleting stack %s: %s' % (stack_name, ex))
 
     def tail_stack_events(self, stack_name, initial_entry=None):
         """
@@ -370,6 +370,8 @@ class CFNClient(object):
     @staticmethod
     def _error_mesg(err):
         return err.response['Error']['Message']
+
+
 
 def main():
     import os

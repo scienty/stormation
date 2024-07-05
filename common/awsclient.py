@@ -15,7 +15,7 @@ import time
 import jmespath
 import logging
 
-import awssession
+from common.awssession import get_session
 from common.exception import ClientError
 
 LOG = logging.getLogger(__name__)
@@ -24,18 +24,15 @@ LOG = logging.getLogger(__name__)
 class AWSClient(object):
 
     def __init__(self, service_name, region_name=None, **kwargs):
-        if kwargs.get('profile', None) is None:
-            kwargs['profile'] = 'default'
-
         session = kwargs.get("session", None)
         if session is None:
-            session = awssession.get_session(region_name, **kwargs)
+            session = get_session(region_name, **kwargs)
         self._session = session
 
         self._service_name = service_name
         self._region_name = region_name
         self._kwargs = kwargs
-        self._boto_client = self._session.client(service_name, region_name, **kwargs)
+        self._boto_client = self._session.client(service_name, region_name)
         if self._boto_client is None:
             raise ClientError("0", "Failed to connect to AWS service", "get boto client")
         if self._region_name is None:
@@ -124,16 +121,3 @@ class AWSClient(object):
         if query:
             data = query.search(data)
         return data
-
-
-def main():
-    import json
-    region = 'us-west-2'
-    profile = 'my-aws-profile'
-    client = AWSClient(service_name='sts', region_name=region, profile=profile)
-    data = client.call('get_caller_identity')
-    print(json.dumps(data))
-
-
-if __name__ == '__main__':
-    main()

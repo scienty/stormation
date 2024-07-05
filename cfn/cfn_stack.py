@@ -16,15 +16,16 @@ CFNStack represents one independent cloud formation stack
 import logging
 import json, yaml
 import jmespath
-from cfn_client import CFNClient, StackSuccessStatus, StackFailStatus, StackUnknownStatus
+from cfn.cfn_client import CFNClient, StackSuccessStatus, StackFailStatus, StackUnknownStatus
 from pathlib import Path
 import jinja2
 from common.langhelper import importFromURI as importPythonFile
+from common.s3bucket import  put_template as put_template_to_s3
 
 logger = logging.getLogger(__name__)
 
 class CFNStack(object):
-    def __init__(self, key, name, aws_region, **kwargs):
+    def __init__(self, key, name, aws_region, enabled:bool=False, **kwargs):
         self.key = key
         self.name = name
         self.aws_region = aws_region
@@ -32,9 +33,9 @@ class CFNStack(object):
         self.depends_on = {}
         self.kwargs = kwargs
         self.cfn_vars = {}
-
+        self.enabled = enabled
         if len(key) <= 0 or len(name) <=0 or len(aws_region) <= 0:
-            self.logger.critical("Stack key, name and aws_region are required fields.")
+            logger.critical("Stack key, name and aws_region are required fields.")
             exit(1)
 
         self.cfn_client = CFNClient.get_client(aws_region, **kwargs)
@@ -70,9 +71,9 @@ class CFNStack(object):
             resources[res.get('LogicalResourceId')] = str(res.get('PhysicalResourceId'))
 
         self.cfn_vars = {
-            'parameters': parameters,
-            'outputs': outputs,
-            'resources': resources
+            'Parameters': parameters,
+            'Outputs': outputs,
+            'Resources': resources
         }
 
         return self.cfn_vars
@@ -86,28 +87,29 @@ class CFNStackData(CFNStack):
     """
     
     """
-    def __init__(self, key, name, aws_region, template, config={}, params={}, tags={},
+    def __init__(self, key, name, aws_region, template, config=dict(), params=dict(), tags=dict(),
                  sns_topic_arn='', **kwargs):
-        super(CFNStackData, self).__init__(key, name, aws_region, **kwargs)
+        super(CFNStackData, self).__init__(key, name, aws_region, True, **kwargs)
 
         self.config = config
         if type(config) is not dict:
-            self.logger.critical("Config for stack %s must be of type dict not %s" % (self.key, type(config)))
+            logger.critical("Config for stack %s must be of type dict not %s" % (self.key, type(config)))
             exit(1)
 
         self.params = params
         if type(self.params) is not dict:
-            self.logger.critical("Parameters for stack %s must be of type dict not %s" % (self.key, type(self.params)))
+            logger.critical("Parameters for stack %s must be of type dict not %s" % (self.key, type(self.params)))
             exit(1)
 
         self.tags = tags
         if type(self.tags) is not dict:
-            self.logger.critical("Tags for stack %s must be of type dict not %s" % (self.key, type(self.tags)))
+            logger.critical("Tags for stack %s must be of type dict not %s" % (self.key, type(self.tags)))
             exit(1)
 
-        self.file = Path(template).resolve()
+        self.file = Path(template)
+            
         if not self.file.exists() or not self.file.is_file():
-            raise Exception("Can not read file %s" % str(self.file))
+            raise Exception('Can not read file %s' % str(self.file))
 
         self.sns_topic_arn = sns_topic_arn
 
@@ -121,8 +123,8 @@ class CFNStackData(CFNStack):
     def _load_template(self):
         import re, mmap
 
-        with open(str(self.file), 'r+b') as f:
-            mp = mmap.mmap(f.fileno(), 0)
+        with open(str(self.file), 'r+') as f:
+            mp = f.read()
             docs = re.split(r'[\r\n\s]*---[\r\n]+', mp)
             raw_template = ""
             raw_config = ""
@@ -137,10 +139,10 @@ class CFNStackData(CFNStack):
 
             return (raw_config, raw_template)
 
-    def compile(self):
-        #for stack in self.depends_on.values():
-        #    if not stack.exists():
-        #        raise Exception("Dependent stack %s for %s does not exist" % (stack.name, self.name))
+    def compile(self, uploadToS3=False):
+        for stack in self.depends_on.values():
+            if not stack.exists():
+                raise Exception("Dependent stack %s for %s does not exist" % (stack.name, self.name))
 
         context = self._get_context()
         self.config = self._resolve_references('config', self.config, context)
@@ -154,28 +156,41 @@ class CFNStackData(CFNStack):
         context = self._get_context()
         raw_config, raw_template = self._load_template()
 
-        # render config from tempalte
         loader = jinja2.loaders.FileSystemLoader(str(self.file.parent))
         jinja_env = jinja2.Environment(loader=loader)
-        template = jinja_env.from_string(raw_config)
-        config_string = template.render(context)
+        # render config from tempalte
+        if len(raw_config.strip()) > 0:
+          template = jinja_env.from_string(raw_config)
+          template.globals['context'] = context
+          config_string = template.render(context)
 
-        local_config = yaml.load(config_string)
-        Local_config = self._resolve_references('config', local_config, context)
-        template_context = dict(local_config.items() + context.items())
+          local_config = yaml.safe_load(config_string)
+          local_config = self._resolve_references('config', local_config, context)
+          template_context = local_config | context
+        else:
+          template_context = context
 
         if self.plugin and hasattr(self.plugin, 'prepare_context'):
             template_context = self.plugin.prepare_context(template_context)
+            if template_context is None:
+                logger.warning("You may have forgotten to return context in plugin " + self.key+ ".py")
 
         template_actual = jinja_env.from_string(raw_template)
-        template_body = template_actual.render(template_context)
-        self.cfn_template = template_body
+        template_actual.globals['context'] = template_context
+        self.cfn_template = template_actual.render(template_context)
+        print(self.cfn_template)
+        #exit(0)
+
+        if(uploadToS3):
+            self.s3_url = put_template_to_s3(self.name, self.cfn_template)
+            resp = self.cfn_client.validate(template_url=self.s3_url)
 
     def cf_retain_constructor(self, loader, tag_suffix, node):
         return "!{} {}".format(tag_suffix, node.value)
 
     def _get_context(self, refresh=False):
         context = {
+            'stack_name': self.name,
             'config': self.config,
             'parameters': self.params,
             'tags': self.tags
@@ -186,28 +201,10 @@ class CFNStackData(CFNStack):
 
         return context
 
-    def validate(self, **kwargs):
-        if self.aws_account is not None:
-            if str(self.aws_account) != str(self.cfn_client.aws_client.aws_account):
-                self.logger.critical("aws_account does not match with aws credentials provided.")
-                exit(1)
-
-
-
-        #if not self.read_template():
-        #    raise Exception("Failed to read template file %s" % self.template)
-        #result = self.cfn_client.validate(self.template_body)
-        #self._capabilities = result.get('Capabilities', [])
-        # remove template body from memory
-        #del self.template_body
-            #iam_conn = iam.connect_to_aws_region(self.aws_region)
-            #user_response = iam_conn.get_user()['get_user_response']
-            #user_result = user_response['get_user_result']
-            #aws_account = user_result['user']['arn'].split(':')[4]
 
     def _resolve_references(self, name, item, context):
         if type(item) is str:
-            return self.resolve_reference(item, context) if item.startswith("$") else item
+            return self.resolve_reference(item, context) if item.startswith("$") and not item.startswith("$$") else item
         elif type(item) is dict:
             for key, value in item.items():
                 item[key] = self._resolve_references(name, value, context)
@@ -259,6 +256,26 @@ class CFNStackData(CFNStack):
 
         raise Exception('Failed to resolve variable %s ' % attr)
 
+########## cleanup
+    def validate(self, **kwargs):
+        if self.aws_account is not None:
+            if str(self.aws_account) != str(self.cfn_client.aws_client.aws_account):
+                self.logger.critical("aws_account does not match with aws credentials provided.")
+                exit(1)
+
+
+
+        #if not self.read_template():
+        #    raise Exception("Failed to read template file %s" % self.template)
+        #result = self.cfn_client.validate(self.template_body)
+        #self._capabilities = result.get('Capabilities', [])
+        # remove template body from memory
+        #del self.template_body
+            #iam_conn = iam.connect_to_aws_region(self.aws_region)
+            #user_response = iam_conn.get_user()['get_user_response']
+            #user_result = user_response['get_user_result']
+            #aws_account = user_result['user']['arn'].split(':')[4]
+
     def delete_stack(self, wait=True):
         if not self.exists():
             self.logger.info("Stack does not exist in aws")
@@ -273,7 +290,7 @@ class CFNStackData(CFNStack):
         if self.exists():
             info = self.get_info(True)
             if info.statusInProgress():
-                self.logger.info("Waiting for the existing operation to complete")
+                logger.info("Waiting for the existing operation to complete")
                 if wait:
                     self.wait_on_events(0)
                     info = self.get_info(True)
@@ -283,19 +300,18 @@ class CFNStackData(CFNStack):
             if info.status() == 'CREATE_FAILED':
                 self.delete_stack()
 
-        self.compile()
+        self.compile(uploadToS3=True)
 
         if self.exists():
-            resp = self.cfn_client.update_stack(stack_name=self.name, template=self.cfn_template, parameters=self.params)
+            resp = self.cfn_client.update_stack(stack_name=self.name, template_url=self.s3_url, parameters=self.params)
             if resp:
-                self.logger.info('StackID:%s'%resp['StackId'])
+                logger.info('StackID:%s'%resp['StackId'])
             return self.wait_on_events(None) if wait else None
         else:
-            resp = self.cfn_client.create_stack(stack_name=self.name, template=self.cfn_template, parameters=self.params)
+            resp = self.cfn_client.create_stack(stack_name=self.name, template_url=self.s3_url, parameters=self.params)
             if resp:
-                self.logger.info('StackID:%s' % resp['StackId'])
+                logger.info('StackID:%s' % resp['StackId'])
             return self.wait_on_events(0) if wait else None
-
 
 
     def apply(self, op=1, strict=True, wait=True):
@@ -306,7 +322,7 @@ class CFNStackData(CFNStack):
         """
 
         exists = self.cfn_client.stack_exists(self.name)
-        if op == CFNStack.OP_DELETE:
+        if op == CFNStackData.OP_DELETE:
             if exists:
                 if self.check_deps_delete():
                     self.cfn_client.delete_stack(self.name)
@@ -359,16 +375,16 @@ class CFNStackData(CFNStack):
 
         for event in stack_events_iterator:
             if isinstance(event, StackFailStatus):
-                self.logger.error('Stack operation failed: %s', event)
+                logger.error('Stack operation failed: %s', event)
                 return event
             elif isinstance(event, StackSuccessStatus):
-                self.logger.info('Stack operation succeeded: %s', event)
+                logger.info('Stack operation succeeded: %s', event)
                 return event
             elif isinstance(event, StackUnknownStatus):
-                self.logger.info('Stack operation unknown: %s', event)
+                logger.info('Stack operation unknown: %s', event)
                 return event
             else:
-                self.logger.info(
+                logger.info(
                     '%(resource_type)s %(logical_resource_id)s %(physical_resource_id)s %(resource_status)s %(resource_status_reason)s',
                     event)
 

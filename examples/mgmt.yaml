@@ -1,0 +1,44 @@
+---
+#TODO: let us add client VPN endpoint to access to the bastion. We add EIP right now so that we can connect to bastion
+mgmt_subnets: [{{Network.Outputs.ManagementSubnets}}]
+bastion_ami: $config.bastion_ami
+key_pair_name: $Security.Outputs.KeyPairbastion
+security_group: $Security.Outputs.SecurityGroupbastion
+---
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create Bastion host in Management subnet
+
+Resources:
+  BastionASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Join ["", [!Ref "AWS::StackName", "BastionHostASG"]]
+      LaunchConfigurationName: !Ref BastionLaunchConfig
+      VPCZoneIdentifier:
+      {%- for subnet_id in mgmt_subnets %}
+        - {{subnet_id}}
+      {%- endfor %}
+      MinSize: "1"
+      DesiredCapacity: "1"
+      MaxSize: "1"
+      Tags:
+        - Key: Name
+          Value: !Join ["", [!Ref "AWS::StackName", "BastionHost"]]
+          PropagateAtLaunch: true
+
+  BastionLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      LaunchConfigurationName: !Join [ "", [ !Ref "AWS::StackName", "BastionHostLaunchConfiguration" ] ]
+      AssociatePublicIpAddress: true
+      ImageId: {{ bastion_ami }}
+      InstanceType: t1.micro
+      KeyName: {{key_pair_name}}
+      SecurityGroups:
+        - {{security_group}}
+
+Outputs:
+  Sample:
+    Description: Sample
+    Value: 'Sample'

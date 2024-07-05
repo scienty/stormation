@@ -12,7 +12,7 @@
 # language governing permissions and limitations under the License.
 
 import os
-import imp
+import importlib.util
 
 
 def importFromURI(uri, absl=False):
@@ -23,15 +23,15 @@ def importFromURI(uri, absl=False):
 
     no_ext = os.path.join(path, mname)
 
+    mod_path = None
     if os.path.exists(no_ext + '.pyc'):
-        try:
-            return imp.load_compiled(mname, no_ext + '.pyc')
-        except Exception as e:
-            raise e
-    if os.path.exists(no_ext + '.py'):
-        try:
-            return imp.load_source(mname, no_ext + '.py')
-        except Exception as e:
-            raise e
+        mod_path = no_ext + '.pyc'
+    elif os.path.exists(no_ext + '.py'):
+        mod_path = no_ext + '.py'
+    else:
+        return None
 
-	return None
+    spec = importlib.util.spec_from_file_location(mname, mod_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
