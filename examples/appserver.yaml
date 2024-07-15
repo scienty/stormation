@@ -1,12 +1,11 @@
 ---
 vpc_id: $Network.Outputs.VPC
 public_subnets: [{{Network.Outputs.PublicSubnets}}]
-webtier_subnets: [{{Network.Outputs.WebtierSubnets}}]
-ec2_ami: $config.bastion_ami
-ec2_type: t2.micro
+private_subnets: [{{Network.Outputs.PrivateSubnets}}]
+ec2_type: t2.medium
 key_pair_name: $Security.Outputs.KeyPairworkload
-elb_security_group: $Security.Outputs.SecurityGroupelb
-web_server_security_group: $Security.Outputs.SecurityGroupwebServer
+elb_security_group: $Security.Outputs.SecurityGroupappElb
+app_server_security_group: $Security.Outputs.SecurityGroupprivate
 email_notification_topic: $Common.Outputs.EmailNotificationTopic
 ---
 
@@ -14,18 +13,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Create Bastion host in Management subnet
 
 Resources:
-  WebAppS3Bucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: {{stack_name|lower}}-bucket
-      AccessControl: Private
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: True
-        BlockPublicPolicy: True
-        IgnorePublicAcls: True
-        RestrictPublicBuckets: True
-
-  WebServerInstanceIamRole:
+  AppServerInstanceIamRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -39,45 +27,16 @@ Resources:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeployLimited"
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy"
-      Policies:
-        - PolicyName: MountPointS3Access
-          PolicyDocument: # MountPoint for S3: https://github.com/awslabs/mountpoint-s3/blob/main/doc/CONFIGURATION.md
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:ListBucket
-                Resource: !Sub
-                  - "arn:${AWS::Partition}:s3:::${bucketName}"
-                  - bucketName: !Ref WebAppS3Bucket
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:AbortMultipartUpload
-                  - s3:DeleteObject
-                Resource: !Sub
-                  - "arn:${AWS::Partition}:s3:::${bucketName}/*"
-                  - bucketName: !Ref WebAppS3Bucket
-        - PolicyName: MountPointS3ExpressAccess
-          PolicyDocument: # MountPoint for S3: https://github.com/awslabs/mountpoint-s3/blob/main/doc/CONFIGURATION.md
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3express:CreateSession
-                Resource: !Sub
-                  - "arn:${AWS::Partition}:s3express:${AWS::Region}:${AWS::AccountId}:bucket/${bucketName}--az_id--x-s3"
-                  - bucketName: !Ref WebAppS3Bucket
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/SecretsManagerReadWrite"
 
-  WebServerInstanceProfile:
+  AppServerInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Path: /
       Roles:
-        - !Ref WebServerInstanceIamRole
+        - !Ref AppServerInstanceIamRole
 
-  WebServerLaunchTemplate:
+  AppServerLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Metadata:
       Comment: Install Update files
@@ -106,57 +65,6 @@ Resources:
               mode: "000755"
               owner: "ubuntu"
               group: "ubuntu"
-            "/home/ubuntu/update-mountpoint-s3":
-              content: |
-                #!/bin/bash
-                cd /tmp
-                rm -f ./mount-s3.deb
-                if (uname -a | grep -q x86); then
-                  wget -4 https://s3.amazonaws.com/mountpoint-s3-release/latest/x86_64/mount-s3.deb
-                else
-                  wget -4 https://s3.amazonaws.com/mountpoint-s3-release/latest/arm64/mount-s3.deb
-                fi
-                sudo apt-get install -y ./mount-s3.deb
-              mode: "000755"
-              owner: "ubuntu"
-              group: "ubuntu"
-            "/etc/systemd/system/mount-s3-helper.service":
-              content: |
-                # https://github.com/awslabs/mountpoint-s3/blob/main/doc/CONFIGURATION.md#automatically-mounting-an-s3-bucket-at-boot
-                [Unit]
-                Description=Mountpoint for S3 helper
-                Wants=network.target
-                
-                [Service]
-                Restart=on-failure
-                RestartSec=5
-                Type=forking
-                ExecStart=/opt/mount-s3-helper.sh
-                ExecStop=/usr/bin/fusermount -u /mnt/s3-bucket-mount
-                
-                [Install]
-                WantedBy=remote-fs.target
-              mode: "000644"
-              owner: "root"
-              group: "root"
-            "/opt/mount-s3-helper.sh":
-              content: !Sub
-                - |
-                  #!/bin/bash
-                  S3_BUCKET_NAME=${S3_BUCKET_NAME}
-                  MOUNT_FOLDER=/mnt/s3-bucket-mount
-                  USER=ubuntu
-                  GROUP=www-data
-                  
-                  USERID=$(cat /etc/passwd | grep ^$USER: | head -n 1 | cut -d":" -f 3)
-                  GROUPID=$(cat /etc/group | grep ^$GROUP: | head -n 1 | cut -d":" -f 3)
-                  
-                  mkdir -p $MOUNT_FOLDER
-                  /usr/bin/mount-s3 --uid $USERID --gid $GROUPID --allow-overwrite --allow-delete --allow-other $S3_BUCKET_NAME $MOUNT_FOLDER
-                - S3_BUCKET_NAME: !Ref WebAppS3Bucket
-              mode: "000744"
-              owner: "root"
-              group: "root"
             "/opt/aws/amazon-cloudwatch-agent/bin/config.json":
               content: |
                 {
@@ -233,25 +141,17 @@ Resources:
           commands:
             update-awscli:
               command: /usr/bin/bash /home/ubuntu/update-awscli
-            update-mountpoint-s3:
-              command: /usr/bin/bash /home/ubuntu/update-mountpoint-s3
-
-          services:
-            systemd:
-              mount-s3-helper:
-                enabled: "true"
-                ensureRunning: "true"
 
     Properties:
       LaunchTemplateName: {{stack_name|lower}}-launch-template
       LaunchTemplateData:
         IamInstanceProfile:
-          Name: !Ref WebServerInstanceProfile
+          Name: !Ref AppServerInstanceProfile
         ImageId: '{{"{{"}}resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id{{"}}"}}'
         InstanceType: {{ec2_type}}
         KeyName: {{key_pair_name}}
         SecurityGroupIds:
-          - {{web_server_security_group}}
+          - {{app_server_security_group}}
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
@@ -272,7 +172,9 @@ Resources:
             apt-get install -q -y wget unzip tar curl sed git
             
             mkdir -p /tmp/cfn
-            cd /tmp/cfn
+            cd /tmp/cfn\
+            
+            apt-get install -q -y wget unzip tar curl sed git
             
             # CfN scripts: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-helper-scripts-reference.html
             apt-get install -q -y python3 python3-pip python3-setuptools python3-docutils python3-daemon
@@ -281,21 +183,21 @@ Resources:
             cd aws-cfn-bootstrap-2.0
             python3 setup.py build
             python3 setup.py install
-            
             cd /tmp/cfn
+            
+            export CFN_INIT="python3 /usr/local/bin/cfn-init"
+            $CFN_INIT -v --stack ${AWS::StackName} --resource AppServerLaunchTemplate --region ${AWS::Region} -c setup
+            
+            
+            # Certbot
+            apt-get install -q -y certbot
+            apt-get install -q -y python3-certbot-dns-route53 python-certbot-dns-route53-doc 
             
             # CodeDeploy agent: https://docs.aws.amazon.com/codedeploy/latest/userguide/codedeploy-agent-operations-install-ubuntu.html
             apt-get install -q -y ruby-full
             curl -s -L -O https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
             chmod +x ./install
             ./install auto
-            
-            export CFN_INIT="python3 /usr/local/bin/cfn-init"
-            $CFN_INIT -v --stack ${AWS::StackName} --resource WebServerLaunchTemplate --region ${AWS::Region} -c setup
-            
-            # Certbot
-            apt-get install -q -y certbot
-            apt-get install -q -y python3-certbot-dns-route53 python-certbot-dns-route53-doc 
             
             # CloudWatch agent: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/install-CloudWatch-Agent-on-EC2-Instance.html
             if (uname -a | grep -q x86); then
@@ -311,16 +213,18 @@ Resources:
             
             echo "<h1>Hello World!</h1>" > /var/www/html/index.html
             
+            pip install aws-secretsmanager-caching
+            
             # enable back IPv6
             sysctl -w net.ipv6.conf.all.disable_ipv6=0
             sysctl -w net.ipv6.conf.default.disable_ipv6=0
 
-  WebServerAutoScalingGroup:
+  AppServerAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       LaunchTemplate:
-        LaunchTemplateId: !Ref WebServerLaunchTemplate
-        Version: !GetAtt WebServerLaunchTemplate.LatestVersionNumber
+        LaunchTemplateId: !Ref AppServerLaunchTemplate
+        Version: !GetAtt AppServerLaunchTemplate.LatestVersionNumber
       MaxSize: '1'
       MinSize: '1'
       NotificationConfigurations:
@@ -328,8 +232,7 @@ Resources:
           NotificationTypes: [ 'autoscaling:EC2_INSTANCE_LAUNCH', 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR', 'autoscaling:EC2_INSTANCE_TERMINATE', 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR' ]
       TargetGroupARNs:
         - !Ref EC2TargetGroupHTTP
-        - !Ref EC2TargetGroupHTTPS
-      VPCZoneIdentifier: {{webtier_subnets}}
+      VPCZoneIdentifier: {{private_subnets}}
 
   EC2TargetGroupHTTP:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -338,60 +241,34 @@ Resources:
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 15
       HealthyThresholdCount: 5
-      Matcher:
-        HttpCode: '200'
       Name: EC2TargetGroupHTTP
       Port: 80
-      Protocol: HTTP
+      Protocol: TCP
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: '20'
       UnhealthyThresholdCount: 3
       VpcId: {{vpc_id}}
-  EC2TargetGroupHTTPS:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      HealthCheckIntervalSeconds: 30
-      HealthCheckProtocol: HTTPS
-      HealthCheckTimeoutSeconds: 15
-      HealthyThresholdCount: 5
-      Matcher:
-        HttpCode: '200'
-      Name: EC2TargetGroupHTTPS
-      Port: 443
-      Protocol: HTTP
-      TargetGroupAttributes:
-        - Key: deregistration_delay.timeout_seconds
-          Value: '20'
-      UnhealthyThresholdCount: 3
-      VpcId: {{vpc_id}}
-  ApplicationLoadBalancer:
+
+  AppNetworkLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
+      Type: 'network'
       Scheme: internet-facing
-      Subnets: {{public_subnets}}
+      Subnets: {{private_subnets}}
       SecurityGroups:
         - {{elb_security_group}}
-  ALBListenerHTTP:
+  AppNLBListenerHTTP:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref EC2TargetGroupHTTP
-      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      LoadBalancerArn: !Ref AppNetworkLoadBalancer
       Port: 80
-      Protocol: HTTP
-#  ALBListenerHTTPS:
-#    Type: AWS::ElasticLoadBalancingV2::Listener
-#    Properties:
-#      DefaultActions:
-#        - Type: forward
-#          TargetGroupArn: !Ref EC2TargetGroupHTTPS
-#      LoadBalancerArn: !Ref ApplicationLoadBalancer
-#      Port: 443
-#      Protocol: HTTPS
+      Protocol: TCP
 
 Outputs:
-  Sample:
-    Description: Sample
-    Value: 'Sample'
+  AppLoadBalancer:
+    Description: App Network Load Balancer
+    Value: !Ref AppNetworkLoadBalancer

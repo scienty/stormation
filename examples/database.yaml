@@ -1,0 +1,141 @@
+---
+vpc_id: $Network.Outputs.VPC
+db_username: $config.database.username
+db_name: $config.database.name
+aurora_engine_version: $config.database.aurora.engine_version
+private_subnets: [{{Network.Outputs.PrivateSubnets}}]
+postgres_security_group: $Security.Outputs.SecurityGrouprdspostgres
+email_notification_topic: $Common.Outputs.EmailNotificationTopic
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create required database instances
+
+Resources:
+  DBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupName: !Ref 'AWS::StackName'
+      DBSubnetGroupDescription: !Ref 'AWS::StackName'
+      SubnetIds: {{private_subnets}}
+
+  RDSMasterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join [ '/', [ 'aurora-pg', !Ref 'AWS::StackName' ] ]
+      Description: !Join [ '', [ 'AuroraPostgres PostgreSQL Master User Secret ', 'for CloudFormation Stack ', !Ref 'AWS::StackName' ] ]
+      Tags:
+        - Key: DatabaseEngine
+          Value: 'AuroraPostgres PostgreSQL'
+        - Key: StackID
+          Value: !Ref 'AWS::StackId'
+      GenerateSecretString:
+        SecretStringTemplate: !Join [ '', [ '{"username": "', {{db_username}}, '"}' ] ]
+        GenerateStringKey: "password"
+        ExcludeCharacters: '"@/\'
+        PasswordLength: 16
+
+  RDSAuroraPostgresDBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Join [ "- ", [ "AuroraPostgres PG Cluster Parameter Group for  Cloudformation Stack ", {{db_name}} ] ]
+      Family: aurora-postgresql13
+      Parameters:
+        rds.force_ssl: 1
+
+  AuroraPostgresDBParamGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Join [ "- ", [ "AuroraPostgres PG Database Instance Parameter Group for Cloudformation Stack ", {{db_name}} ] ]
+      Family: aurora-postgresql13
+      Parameters:
+        shared_preload_libraries: auto_explain,pg_stat_statements,pg_hint_plan,pgaudit
+        log_statement: "ddl"
+        log_connections: 1
+        log_disconnections: 1
+        log_lock_waits: 1
+        log_min_duration_statement: 5000
+        auto_explain.log_min_duration: 5000
+        auto_explain.log_verbose: 1
+        log_rotation_age: 1440
+        log_rotation_size: 102400
+        rds.log_retention_period: 10080
+        random_page_cost: 1
+        track_activity_query_size: 16384
+        idle_in_transaction_session_timeout: 7200000
+        statement_timeout: 7200000
+        search_path: '"$user",public'
+
+  AuroraPostgresDBCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: {{aurora_engine_version}}
+      DatabaseName: {{db_name}}
+      Port: 5432
+      MasterUsername: !Join [ '', [ '{{ "{{" }}resolve:secretsmanager:', !Ref RDSMasterSecret, ':SecretString:username{{ "}}" }}' ] ]
+      MasterUserPassword: !Join [ '', [ '{{ "{{" }}resolve:secretsmanager:', !Ref RDSMasterSecret, ':SecretString:password{{ "}}" }}' ] ]
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds:
+        - {{postgres_security_group}}
+      DBClusterParameterGroupName: !Ref RDSAuroraPostgresDBClusterParameterGroup
+      EnableIAMDatabaseAuthentication: true
+      Tags:
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  AuroraPostgresDBFirstInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.t4g.medium
+      DBClusterIdentifier: !Ref AuroraPostgresDBCluster
+      Engine: aurora-postgresql
+      EngineVersion: {{aurora_engine_version}}
+      DBParameterGroupName:
+        Ref: AuroraPostgresDBParamGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      Tags:
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+  AuroraPostgresDBSecondInstance:
+    Type: AWS::RDS::DBInstance
+    DependsOn:
+      - AuroraPostgresDBFirstInstance
+    Properties:
+      DBInstanceClass: db.t4g.medium
+      DBClusterIdentifier: !Ref AuroraPostgresDBCluster
+      Engine: aurora-postgresql
+      EngineVersion: {{aurora_engine_version}}
+      DBParameterGroupName:
+        Ref: AuroraPostgresDBParamGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      Tags:
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+
+Outputs:
+  RDSMasterSecretArn:
+    Description: 'Master Secret ARN shared by all databases'
+    Value: !Ref 'RDSMasterSecret'
+  RDSDBUsername:
+    Description: 'Database master username key'
+    Value: 'username'
+  RDSDBPassword:
+    Description: 'Database master password key in secret manager'
+    Value: 'password'
+  AuroraPostgresClusterEndpoint:
+    Description: 'AuroraPostgres Cluster/Writer Endpoint'
+    Value: !GetAtt 'AuroraPostgresDBCluster.Endpoint.Address'
+  AuroraPostgresReaderEndpoint:
+    Description: 'AuroraPostgres Reader Endpoint'
+    Value: !GetAtt 'AuroraPostgresDBCluster.ReadEndpoint.Address'
+  AuroraPostgresPort:
+    Description: 'AuroraPostgres Endpoint Port'
+    Value: !GetAtt 'AuroraPostgresDBCluster.Endpoint.Port'
+  AuroraPostgresDBName:
+    Description: 'Database Name'
+    Value: {{db_name}}

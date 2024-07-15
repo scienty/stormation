@@ -188,7 +188,7 @@ class CFNClient(object):
 
     def create_change_set(self, stack_name, template, parameters):
         params = self._convert_params(parameters)
-        return self.aws_client.call('create_change_set', StackName=stack_name, TemplateBody=template, Parameters=params, Capabilities=['CAPABILITY_IAM'])
+        return self.aws_client.call('create_change_set', StackName=stack_name, TemplateBody=template, Parameters=params, Capabilities=['CAPABILITY_IAM', 'CAPABILITY_AUTO_EXPAND'])
 
     def delete_change_set(self, stack_name, change_set_name):
         return self.aws_client.call('delete_change_set', StackName=stack_name, ChangeSetName=change_set_name)
@@ -215,7 +215,7 @@ class CFNClient(object):
         try:
             params = self._convert_params(parameters)
             #self.conn.update_stack(StackName=stack_name, TemplateBody=template, Parameters=params, Capabilities=['CAPABILITY_IAM'])
-            return self.aws_client.call('update_stack', StackName=stack_name, TemplateURL=template_url, Parameters=params, Capabilities=['CAPABILITY_IAM'])
+            return self.aws_client.call('update_stack', StackName=stack_name, TemplateURL=template_url, Parameters=params, Capabilities=['CAPABILITY_IAM', 'CAPABILITY_AUTO_EXPAND'])
         except botocore.exceptions.ClientError as ex:
             if CFNClient._error_mesg(ex) == 'No updates are to be performed.':
                 # this is not really an error, but there aren't any updates.
@@ -240,7 +240,7 @@ class CFNClient(object):
             params = self._convert_params(parameters)
 
             #self.conn.create_stack(StackName=stack_name, TemplateBody=template, DisableRollback=True,Parameters=params, Capabilities=['CAPABILITY_IAM'])
-            return self.aws_client.call('create_stack', StackName=stack_name, TemplateURL=template_url, DisableRollback=True, Parameters=params, Capabilities=['CAPABILITY_IAM'])
+            return self.aws_client.call('create_stack', StackName=stack_name, TemplateURL=template_url, DisableRollback=True, Parameters=params, Capabilities=['CAPABILITY_IAM', 'CAPABILITY_AUTO_EXPAND'])
         except botocore.exceptions.ClientError as ex:
             raise CloudformationException('Error while creating stack %s: %s' % (stack_name, ex))
 

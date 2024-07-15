@@ -1,8 +1,11 @@
 ---
 vpc_id: $Network.Outputs.VPC
 key_pair_names: $config.key_pair_names
+all_subnets: [{{Network.Outputs.AllSubnets}}]
+private_subnets: [{{Network.Outputs.PrivateSubnets}}]
 
 #TODO: we can create prefix list for each subnet type in network.yaml
+# Security groups are statueful, explicit rule for return traffic not required
 security_groups:
   bastion:
     description: Bastion security group
@@ -10,29 +13,49 @@ security_groups:
       # cidr, cidrv6, prefixList, securityGroup are exclusive and the meaning changes based on direction, this list is flattened and expanded by plugin security.py
       # { direction: ingress|egress, protocol: tcp|udp|icmp|icmpv6|All, ports: 80-90|All, cidr: 0.0.0.0/0, v6cidr: xxx:10, prefixList: abc, securityGroup: abc, securityGroupOwner: 1234}
       - { direction: ingress,  protocol: tcp, ports: 22, cidr: 0.0.0.0/0, description: "SSH to bastion" }
-      - { direction: egress,  protocol: tcp, ports: 1024-65535, cidr: 0.0.0.0/0, description: "Allow return traffic" }
-      - { direction: ingress,  protocol: udp, ports: 123, cidr: 0.0.0.0/0, description: "Allow NTP sync" }
-  elb:
+      - { direction: egress,  protocol: tcp, ports: 22, cidr: $config.vpc_cidr, description: "SSH from bastion" }
+      - { direction: egress,  protocol: all, ports: all, cidr: 0.0.0.0/0, description: "Allow updates and other traffic" }
+  publicElb:
     description: Security group for ELB to allow HTTP traffic
     rules:
       - { direction: ingress,  protocol: tcp, ports: 80, cidr: 0.0.0.0/0, description: "Allow public web" }
       - { direction: ingress,  protocol: tcp, ports: 443, cidr: 0.0.0.0/0, description: "Allow public web" }
+      - { direction: egress,  protocol: UDP, ports: 123, cidr: 0.0.0.0/0, description: "Allow NTP Sync" }
 
   webServer:
     description: Allow host in public subnet to receive traffic from http and bastion
     rules:
-      - { direction: ingress,  protocol: tcp, ports: 80, securityGroup: elb, description: "Allow public web" }
-      - { direction: ingress,  protocol: tcp, ports: 443, securityGroup: elb, description: "Allow public web" }
+      - { direction: ingress,  protocol: tcp, ports: 80, securityGroup: publicElb, description: "Allow public web" }
+      - { direction: ingress,  protocol: tcp, ports: 443, securityGroup: publicElb, description: "Allow public web" }
       - { direction: ingress,  protocol: tcp, ports: 22, securityGroup: bastion, description: "Allow SSH from bastion" }
-      - { direction: egress,  protocol: tcp, ports: 1024-65535, cidr: 0.0.0.0/0, description: "Allow return traffic" }
+      - { direction: egress,  protocol: all, ports: all, cidr: 0.0.0.0/0, description: "Allow updates and other traffic" }
+
+  appElb:
+    description: Security group for ELB to allow HTTP traffic from web server to private ELB
+    rules:
+      - { direction: ingress,  protocol: tcp, ports: 80, securityGroup: webServer, description: "Allow HTTP from webserver" }
+      - { direction: ingress,  protocol: tcp, ports: 443, securityGroup: webServer, description: "Allow HTTPS from webserver" }
+      - { direction: egress,  protocol: UDP, ports: 123, cidr: 0.0.0.0/0, description: "Allow NTP Sync" }
+
   private:
     description: Security group for communication within private subnet
     rules:
-      - { direction: ingress,  protocol: All, ports: All, securityGroup: private, description: "Allow all within private subnet" }
-      - { direction: ingress,  protocol: TCP, ports: 1-1023, securityGroup: webServer, description: "Allow application traffic from webserver" }
-      - { direction: ingress,  protocol: UDP, ports: 1-1023, securityGroup: webServer, description: "Allow application traffic from webserver" }
+      - { direction: ingress,  protocol: tcp, ports: 80, securityGroup: appElb, description: "Allow HTTP from appElb" }
+      - { direction: ingress,  protocol: tcp, ports: 443, securityGroup: appElb, description: "Allow HTTPS from appElb" }
       - { direction: ingress,  protocol: tcp, ports: 22, securityGroup: bastion, description: "Allow SSH from bastion" }
-      - { direction: egress,  protocol: tcp, ports: 1024-65535, securityGroup: webServer, description: "Allow return public subnet" }
+      - { direction: egress,  protocol: all, ports: all, cidr: 0.0.0.0/0, description: "Allow updates and other traffic" }
+
+  secretsManager:
+    description: Security group for secret rotation
+    rules:
+      - { direction: ingress,  protocol: All, ports: All, securityGroup: secretsManager, description: "Self Ref" }
+      - { direction: ingress,  protocol: tcp, ports: 443, securityGroup: private, description: "Allow instance in private subnet to access secrets" }
+
+  rdspostgres:
+    description: Security group for rds postgres restricted to private subnet
+    rules:
+      - { direction: ingress,  protocol: TCP, ports: 5432, securityGroup: private, description: "Allow DB traffic from private" }
+      - { direction: egress,  protocol: UDP, ports: 123, cidr: 0.0.0.0/0, description: "Allow NTP Sync" }
 ---
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Create required key pairs and security groups
@@ -122,6 +145,22 @@ Resources:
         {%- endif %}
       {%- endfor %}
   {%- endfor %}
+          
+  SecretsManagerVPCEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      VpcEndpointType: 'Interface'
+      PrivateDnsEnabled: true
+      VpcId: {{vpc_id}}
+      SubnetIds: {{private_subnets}}
+      SecurityGroupIds:
+      - !Ref SecurityGroupsecretrotation
+      ServiceName: !Join
+      - ''
+      - - com.amazonaws.
+        - !Ref 'AWS::Region'
+        - .secretsmanager
+
 Outputs:
 {%- for key_pair_name in key_pair_names %}
   {%- set fq_key_pair_name = "%s_%s"|format(stack_name,key_pair_name) %}
@@ -134,3 +173,5 @@ Outputs:
     Description: Security Group for {{security_group_name}}
     Value: !Ref 'SecurityGroup{{security_group_name}}'
 {%- endfor %}
+  SecretManagerVPCEndpoint:
+    Value: !Ref SecretsManagerVPCEndpoint

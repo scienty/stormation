@@ -1,6 +1,6 @@
 ---
 #TODO: let us add client VPN endpoint to access to the bastion. We add EIP right now so that we can connect to bastion
-mgmt_subnets: [{{Network.Outputs.ManagementSubnets}}]
+mgmt_subnets: [{{Network.Outputs.MgmtSubnets}}]
 bastion_ami: $config.bastion_ami
 key_pair_name: $Security.Outputs.KeyPairbastion
 security_group: $Security.Outputs.SecurityGroupbastion

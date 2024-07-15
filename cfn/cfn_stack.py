@@ -157,7 +157,7 @@ class CFNStackData(CFNStack):
         raw_config, raw_template = self._load_template()
 
         loader = jinja2.loaders.FileSystemLoader(str(self.file.parent))
-        jinja_env = jinja2.Environment(loader=loader)
+        jinja_env = jinja2.Environment(loader=loader, extensions=['jinja2_ansible_filters.AnsibleCoreFiltersExtension'])
         # render config from tempalte
         if len(raw_config.strip()) > 0:
           template = jinja_env.from_string(raw_config)
@@ -284,7 +284,6 @@ class CFNStackData(CFNStack):
 
         return self.wait_on_events(None) if wait else None
 
-
     def create_update_stack(self, wait=True):
 
         if self.exists():
@@ -297,7 +296,7 @@ class CFNStackData(CFNStack):
                 else:
                     raise Exception("Another operation is in progress for stack %s", self.name)
 
-            if info.status() == 'CREATE_FAILED':
+            if info and info.status() == 'CREATE_FAILED':
                 self.delete_stack()
 
         self.compile(uploadToS3=True)

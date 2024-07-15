@@ -32,6 +32,8 @@ protocol_map = {
 PRIVATE_KEY_EXT = "_private_key.pem"
 PUBLIC_KEY_EXT = "_public_key.pem"
 
+self_dir = os.path.dirname(os.path.abspath(__file__))
+
 def init(stk):
     stack = stk
     print("Initializing stack " + stack.name)
@@ -45,10 +47,11 @@ def prepare_context(context):
 def process_key_pairs(context):
     key_pair_names = context.get('key_pair_names', [])
     for key_name in key_pair_names:
-        if not os.path.isfile(key_name + PUBLIC_KEY_EXT):
+        key_file = self_dir + "/" + key_name
+        if not os.path.isfile(key_file + PUBLIC_KEY_EXT):
             generate_key_pair(key_name)
 
-        with open(key_name + PUBLIC_KEY_EXT, "r") as key_file:
+        with open(key_file + PUBLIC_KEY_EXT, "r") as key_file:
             context[key_name + "_public_key"] = key_file.read()
 
 def generate_key_pair(key_name):
@@ -69,11 +72,12 @@ def generate_key_pair(key_name):
         crypto_serialization.PublicFormat.OpenSSH
     )
 
-    with open(key_name + PRIVATE_KEY_EXT, "wb") as key_file:
-        key_file.write(private_key);
+    key_file = self_dir + "/" + key_name
+    with open(key_file + PRIVATE_KEY_EXT, "wb") as file:
+        file.write(private_key);
 
-    with open(key_name + PUBLIC_KEY_EXT, "wb") as key_file:
-        key_file.write(public_key);
+    with open(key_file + PUBLIC_KEY_EXT, "wb") as file:
+        file.write(public_key);
 
 
 def process_security_groups(context):

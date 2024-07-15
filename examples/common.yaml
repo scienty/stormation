@@ -1,0 +1,65 @@
+---
+email: $config.notification_email
+---
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Security things like ACL Security Groups IAM
+Parameters: {}
+Resources:
+  EC2BootstrapRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+  EC2BootstrapPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ec2_bootstrap_policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - ec2:DescribeInstances
+          - ec2:DescribeTags
+          - ec2:CreateTags
+          Resource:
+          - '*'
+      Roles:
+      - !Ref 'EC2BootstrapRole'
+  EmailNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: {{email}}
+          Protocol: email
+  RDSMonitoringIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "monitoring.rds.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+Outputs:
+  EmailNotificationTopic:
+    Value: !Ref EmailNotificationTopic
+  RDSMonitoringIAMRole:
+    Value: !Ref RDSMonitoringIAMRole
+  BasicEC2BootstrapRole:
+    Value: !Ref EC2BootstrapRole
+

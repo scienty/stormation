@@ -3,7 +3,6 @@
 
 vpc_cidr: {{config.vpc_cidr}}
 igw: true
-
 subnets:
   Mgmt:
     subnet_type: management
@@ -11,11 +10,13 @@ subnets:
     availability_zones: $config.availability_zones
     default_route: internet
     acl:
-      - { action: allow, direction: [ ingress,egress ],   protocol: [ TCP,UDP ], ports: 1024-65535, cidr: 0.0.0.0/0 }
-      #- { action: allow, direction: ingress,  protocol: TCP, cidr: $config.home_networks, ports: 22 }
-      - { action: allow, direction: ingress,  protocol: TCP, cidr: 0.0.0.0/0, ports: 22 }
-      - { action: allow, direction: [ ingress,egress ],   protocol: UDP, cidr: 0.0.0.0/0, ports: 123 }
-      - { action: allow, direction: egress,    protocol: TCP, cidr: $config.vpc_cidr, ports: 22 }
+      - { action: allow, direction: ingress,  protocol: [ TCP,UDP ], ports: 1024-65535, cidr: 0.0.0.0/0, description: "Allow all return traffic v4"}
+      - { action: allow, direction: ingress,  protocol: [ TCP,UDP ], ports: 1024-65535, v6cidr: '::/0', description: "Allow all return traffic v6"}
+      - { action: allow, direction: egress,   protocol: [ TCP,UDP ], ports: 0-65535, cidr: 0.0.0.0/0, description: "Allow all outgoing TCP/UDP v4"}
+      - { action: allow, direction: egress,   protocol: [ TCP,UDP ], ports: 0-65535, v6cidr: '::/0', description: "Allow all outgoing TCP/UDP v6"}
+      #- { action: allow, direction: ingress,  protocol: TCP, cidr: $config.home_networks, ports: 22, description: "Allow SSH from home networks"}
+      - { action: allow, direction: ingress,  protocol: TCP, cidr: 0.0.0.0/0, ports: 22, description: "Allow SSH from home networks" }
+      - { action: allow, direction: [ ingress,egress ], protocol: ICMP, cidr: $config.vpc_cidr, ports: all, description: "Allow ICMP withing vpc"}
     routes:
       - { cidr: 0.0.0.0/0, gateway: igw }
 
@@ -23,14 +24,34 @@ subnets:
     subnet_type: public
     cidr_blocks: {{config.public_subnet_blocks}}
     availability_zones: $config.availability_zones
-    nat_gw_count: $config.nat_gw_count
     default_route: internet
     acl:
-      - { action: allow, direction: [ ingress,egress ],   protocol: [ TCP,UDP ], ports: 1024-65535, cidr: 0.0.0.0/0 }
-      - { action: allow, direction: ingress,  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: 22 }
-      - { action: allow, direction: [ ingress,egress ],  protocol: TCP, cidr: 0.0.0.0/0, ports: [ 80,443 ] }
+      - { action: allow, direction: ingress,  protocol: [ TCP,UDP ], ports: 1024-65535, cidr: 0.0.0.0/0, description: "Allow all return traffic v4" }
+      - { action: allow, direction: ingress,  protocol: [ TCP,UDP ], ports: 1024-65535, v6cidr: '::/0', description: "Allow all return traffic v6" }
+      - { action: allow, direction: egress,   protocol: [ TCP,UDP ], ports: 0-65535, cidr: 0.0.0.0/0, description: "Allow all outgoing TCP/UDP v4" }
+      - { action: allow, direction: egress,   protocol: [ TCP,UDP ], ports: 0-65535, v6cidr: '::/0', description: "Allow all outgoing TCP/UDP v6" }
+      - { action: allow, direction: ingress,  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: 22, description: "Allow SSH from mgmt subnet"}
+      - { action: allow, direction: ingress,  protocol: TCP, cidr: 0.0.0.0/0, ports: [ 80,443 ], description: "Allow HTTP traffic to ELB/ALB"}
+      - { action: allow, direction: [ ingress,egress ], protocol: ICMP, cidr: $config.vpc_cidr, ports: all, description: "Allow ICMP withing vpc"}
     routes:
       - { cidr: 0.0.0.0/0, gateway: igw }
+
+  Webtier:
+    subnet_type: private
+    cidr_blocks: $config.webtier_subnet_blocks
+    availability_zones: $config.availability_zones
+    default_route: nat_gw
+    acl:
+      - { action: allow, direction: ingress,  protocol: [ TCP,UDP ], ports: 1024-65535, cidr: 0.0.0.0/0, description: "Allow all return traffic v4" }
+      - { action: allow, direction: ingress,  protocol: [ TCP,UDP ], ports: 1024-65535, v6cidr: '::/0', description: "Allow all return traffic v6" }
+      - { action: allow, direction: egress,   protocol: [ TCP,UDP ], ports: 0-65535, cidr: 0.0.0.0/0, description: "Allow all outgoing TCP/UDP v4" }
+      - { action: allow, direction: egress,   protocol: [ TCP,UDP ], ports: 0-65535, v6cidr: '::/0', description: "Allow all outgoing TCP/UDP v6" }
+      - { action: allow, direction: ingress,  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: 22, description: "Allow SSH from mgmt subnet" }
+      - { action: allow, direction: ingress,  protocol: TCP, cidr: $config.public_subnet_blocks, ports: [ 80,443 ], description: "Allow HTTP traffic from public subnet" }
+      - { action: allow, direction: ingress,  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: [ 80,443 ], description: "Allow HTTP traffic from mgmt subnet" }
+      - { action: allow, direction: [ ingress,egress ], protocol: ICMP, cidr: $config.vpc_cidr, ports: all, description: "Allow ICMP withing vpc" }
+    routes:
+      - { cidr: 0.0.0.0/0, nat_gateway: nat_gw, }
 
   Private:
     subnet_type: private
@@ -38,10 +59,13 @@ subnets:
     availability_zones: $config.availability_zones
     default_route: nat_gw
     acl:
-      - { action: allow, direction: [ ingress,egress ],   protocol: [ TCP,UDP ], ports: 1024-65535, cidr: 0.0.0.0/0 }
-      - { action: allow, direction: ingress,  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: 22 }
-      - { action: allow, direction: [ ingress,egress ],  protocol: TCP, cidr: $config.public_subnet_blocks, ports: [ 80,443 ] }
-      - { action: allow, direction: [ ingress,egress ],  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: [ 80,443 ] }
+      - { action: allow, direction: ingress,  protocol: [ TCP,UDP ], ports: 1024-65535, cidr: 0.0.0.0/0, description: "Allow all return traffic v4" }
+      - { action: allow, direction: ingress,  protocol: [ TCP,UDP ], ports: 1024-65535, v6cidr: '::/0', description: "Allow all return traffic v6" }
+      - { action: allow, direction: egress,   protocol: [ TCP,UDP ], ports: 0-65535, cidr: 0.0.0.0/0, description: "Allow all outgoing TCP/UDP v4" }
+      - { action: allow, direction: egress,   protocol: [ TCP,UDP ], ports: 0-65535, v6cidr: '::/0', description: "Allow all outgoing TCP/UDP v6" }
+      - { action: allow, direction: ingress,  protocol: TCP, cidr: $config.mgmt_subnet_blocks, ports: 22, description: "Allow SSH from mgmt subnet"}
+      - { action: allow, direction: ingress,  protocol: TCP, cidr: $config.webtier_subnet_blocks, ports: 0-65535 , description: "Allow all traffic from webtier subnet"}
+      - { action: allow, direction: [ ingress,egress ], protocol: ICMP, cidr: $config.vpc_cidr, ports: all, description: "Allow ICMP withing vpc"}
     routes:
       - { cidr: 0.0.0.0/0, nat_gateway: nat_gw, }
 
@@ -79,13 +103,11 @@ Resources:
       InternetGatewayId: !Ref 'InternetGateway'
   {%- endif %}
 
-
   {%- set nat_gws = [] %}
-  {%- set mgmt_subnets = [] %}
-  {%- set public_subnets = [] %}
-  {%- set private_subnets = [] %}
+  {%- set output_subnets = {} %}
   {%- for subnet_def_name in subnets.keys() %}
     {%- set subnet_loop = loop %}
+    {%- set _ = output_subnets.update({subnet_def_name: []}) %}
     {%- set subnet_def = subnets[subnet_def_name] %}
     {%- set subnet_type = subnet_def['subnet_type'] %}
     {%- set cidr_blocks = subnet_def['cidr_blocks'] %}
@@ -98,16 +120,9 @@ Resources:
         {%- set cidr_loop = loop %}
         {%- set subnet_suffix = "%s%s"|format(subnet_def_name,cidr_loop.index0) %}
         {%- set availability_zone = availability_zones[(loop.index0)%(availability_zones|length)] %}
+        {%- set az_suffix = availability_zone | replace("-","") %}
         {%- set subnet_name = 'Subnet'+subnet_suffix %}
-        {%- if subnet_type == 'management' %}
-          {%- set __ = mgmt_subnets.append(subnet_name) %}
-        {%- endif %}
-        {%- if subnet_type == 'public' %}
-          {%- set __ = public_subnets.append(subnet_name) %}
-        {%- endif %}
-        {%- if subnet_type == 'private' %}
-          {%- set __ = private_subnets.append(subnet_name) %}
-        {%- endif %}
+        {%- set __ = output_subnets[subnet_def_name].append(subnet_name) %}
   
   {{subnet_name}}:
     DependsOn:
@@ -122,17 +137,17 @@ Resources:
         Value: !Join ['-', [!Ref 'AWS::StackName', {{subnet_suffix}}]]
       - Key: SubnetType
         Value: {{subnet_type}}
-        {%- if nat_gws|length < nat_gw_count %}
-        {%- set __ = nat_gws.append('NATGateway'+subnet_suffix) %}
-  EIPNat{{subnet_suffix}}:
+        {%- if subnet_type=='public' and az_suffix not in nat_gws %}
+        {%- set __ = nat_gws.append(az_suffix) %}
+  EIPNat{{az_suffix}}:
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
-  NATGateway{{subnet_suffix}}:
+  NATGateway{{az_suffix}}:
     DependsOn: VPCGatewayAttachment
     Type: AWS::EC2::NatGateway
     Properties:
-      AllocationId: !GetAtt [EIPNat{{subnet_suffix}}, AllocationId]
+      AllocationId: !GetAtt [EIPNat{{az_suffix}}, AllocationId]
       SubnetId: !Ref 'Subnet{{subnet_suffix}}'
         {%- endif %}
   RouteTable{{subnet_suffix}}:
@@ -160,7 +175,7 @@ Resources:
     - InternetGateway
             {%- endif %}
            {%- if default_route ==  'nat_gw' %}
-    - {{nat_gws[cidr_loop.index0%nat_gws|length]}}
+    - NATGateway{{az_suffix}}
             {%- endif %}
     Type: AWS::EC2::Route
     Properties:
@@ -170,7 +185,7 @@ Resources:
       GatewayId: !Ref 'InternetGateway'
             {%- endif %}
             {%- if default_route ==  'nat_gw' %}
-      NatGatewayId: !Ref '{{nat_gws[cidr_loop.index0%nat_gws|length]}}'
+      NatGatewayId: !Ref 'NATGateway{{az_suffix}}'
             {%- endif %}
         {% endif %}
   NetworkAcl{{subnet_suffix}}:
@@ -199,16 +214,23 @@ Resources:
       Protocol: '{{acl_entry.protocol_num}}'
       RuleAction: {{acl_entry.action}}
       Egress: '{{acl_entry.egress}}'
+      {%if acl_entry.cidr|default(False) -%}
       CidrBlock: {{acl_entry.cidr}}
+      {%- endif %}
       {%if acl_entry.v6cidr|default(False) -%}
       Ipv6CidrBlock: {{acl_entry.v6cidr}}
+      {%- endif %}
+      {%if acl_entry.icmpCode|default(False) -%}
+      Icmp: 
+        Type: {{acl_entry.icmpType}}
+        Code: {{acl_entry.icmpCode}}
       {%- endif %}
       PortRange:
         From: '{{acl_entry.port_from}}'
         To: '{{acl_entry.port_to}}'
         {%- endfor %}
     {%- endfor %}
-  {%- endfor %}  
+  {%- endfor %}
   
 Outputs:
   VPC:
@@ -217,15 +239,11 @@ Outputs:
   InternetGateway:
     Description: ID of the InternetGateway
     Value: !Ref 'InternetGateway'
-  NATGateways:
-    Description: List of the NATGateway IDs
-    Value: !Join [ ',', [{% for nat_gw in nat_gws %}!Ref {{nat_gw}},{% endfor %}]]
-  ManagementSubnets:
-    Description: List of Management Subnets
-    Value: !Join [ ',', [{% for subnet_name in mgmt_subnets %}!Ref {{subnet_name}},{% endfor %}]]
-  PublicSubnets:
-    Description: List of Public Subnets
-    Value: !Join [ ',', [{% for subnet_name in public_subnets %}!Ref {{subnet_name}},{% endfor %}]]
-  PrivateSubnets:
-    Description: List of Public Subnets
-    Value: !Join [ ',', [{% for subnet_name in private_subnets %}!Ref {{subnet_name}},{% endfor %}]]
+  {% for k, v in output_subnets.items() -%}
+  {{k}}Subnets:
+    Description: List of {{k}} Subnets
+    Value: !Join [ ',', [{% for subnet_name in v %}!Ref {{subnet_name}},{% endfor %}]]
+  {% endfor %}
+  AllSubnets:
+    Description: List of All Subnets
+    Value: !Join [ ',', [{% for subnet_name in output_subnets.values()|flatten %}!Ref {{subnet_name}},{% endfor %}]]

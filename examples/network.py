@@ -74,10 +74,22 @@ def _process_acl_entries(entries):
         if port_range is None:
             raise Exception('ports missing for acl entry %s' % entry)
         ports = str(port_range).split('-')
-        port_from = ports[0]
-        port_to = ports[1] if len(ports) > 1 else port_from
-        entry['port_from'] = port_from
-        entry['port_to'] = port_to
+        from_port = None
+        to_port = None
+        if len(ports) == 2:
+            from_port = ports[0]
+            to_port = ports[1]
+        elif len(ports) == 1 and "all" == ports[0].lower():
+            from_port = "-1"
+            to_port = from_port
+        elif len(ports) == 1:
+            from_port = ports[0]
+            to_port = from_port
+        else:
+            raise Exception('Invalid port range for security group rule %s' % entry)
+
+        entry['port_from'] = from_port
+        entry['port_to'] = to_port
 
         protocol_str = entry.get('protocol', None)
         if protocol_str is None:
@@ -88,6 +100,10 @@ def _process_acl_entries(entries):
             raise Exception('Invalid protocol %s, valid entries are %s' % (entry, protocol_map.keys()))
 
         entry['protocol_num'] = proto_num
+
+        if proto_num == 1:
+            entry['icmpType'] = entry.get('icmpType', '-1')
+            entry['icmpCode'] = entry.get('icmpCode', '-1')
 
         direction = entry.get('direction', None)
         if direction is None or direction.lower() not in ['ingress', 'egress']:

@@ -2,6 +2,7 @@ datetime
 boto3
 pathlib
 jinja2
+jinja2-ansible-filters
 pyyaml
 pystache
 cryptography
