@@ -1,6 +1,6 @@
 config:
-    bundle_name: swo-topology-test
-    notification_email: sample@gmail.com
+    bundle_name: TestBudle
+    notification_email: test@gmail.com
     aws_region: us-west-2
     aws_account: ######18623
 
@@ -13,25 +13,32 @@ config:
     vpc_cidr: 10.0.0.0/16
     mgmt_subnet_blocks: [10.0.1.0/24]
     public_subnet_blocks: [10.0.11.0/24,10.0.12.0/24]
-    private_subnet_blocks: [10.0.21.0/24,10.0.22.0/24]
+    webtier_subnet_blocks: [10.0.21.0/24,10.0.22.0/24]
+    private_subnet_blocks: [10.0.31.0/24,10.0.32.0/24]
     availability_zones: [us-west-2a, us-west-2b]
-    nat_gw_count: 1
     home_networks: [1.1.1.1/24, 2.2.2.2/24]
     key_pair_names: [bastion, workload]
+    database:
+      name: sample_db
+      username: kd42sjdd
+      aurora:
+        engine_version: 13.7
+
+
 
     tags:
-      author: scienty
+      author: prakash
 
 stacks:
-  Iam:
-    enabled: false
-    template: iam.yaml
+  Common:
+    enabled: true
+    template: common.yaml
 
   Network:
-    enabled: false
+    enabled: true
     template: network.yaml
     #aws_region: us-west-2
-    #dependson: [iam]
+    dependson: [Common]
     #parameters:
 
 
@@ -44,15 +51,27 @@ stacks:
     dependson: [Network]
 
   Mgmt:
-    enabled: true
+    enabled: false
     template: mgmt.yaml
     dependson: [Network, Security]
     tags:
       SubnetType: management
 
+  Database:
+    enabled: false
+    template: database.yaml
+    dependson: [Common, Network, Security]
+
+  AppServer:
+    enabled: false
+    template: appserver.yaml
+    dependson: [ Database, Common, Network, Security ]
+    tags:
+      SubnetType: private
+
   WebServer:
     enabled: false
     template: webserver.yaml
-    dependson: [ Network, Security ]
+    dependson: [ Common, Network, Security, WebServer ]
     tags:
       SubnetType: public
