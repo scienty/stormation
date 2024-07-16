@@ -3,15 +3,16 @@ vpc_id: $Network.Outputs.VPC
 public_subnets: [{{Network.Outputs.PublicSubnets}}]
 webtier_subnets: [{{Network.Outputs.WebtierSubnets}}]
 ec2_ami: $config.bastion_ami
-ec2_type: t2.micro
+ec2_type: t2.medium
 key_pair_name: $Security.Outputs.KeyPairworkload
-elb_security_group: $Security.Outputs.SecurityGroupelb
+elb_security_group: $Security.Outputs.SecurityGrouppublicElb
 web_server_security_group: $Security.Outputs.SecurityGroupwebServer
 email_notification_topic: $Common.Outputs.EmailNotificationTopic
+app_server_dns_name: $AppServer.Outputs.AppLoadBalancerDNSName
 ---
 
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Create Bastion host in Management subnet
+Description: Create web server with reverse proxy
 
 Resources:
   WebAppS3Bucket:
@@ -230,6 +231,32 @@ Resources:
               mode: "000644"
               owner: "root"
               group: "root"
+            "//etc/nginx/sites-available/default":
+              content: |
+                server {
+                  listen 80 default_server;
+                  listen [::]:80 default_server;
+              
+                  server_name _;
+              
+                  root /mnt/s3-bucket-mount/html;
+              
+                  index index.html index.htm;
+              
+                  location / {
+                      # First attempt to serve request as file, then
+                      # as directory, then fall back to displaying a 404.
+                      try_files $uri $uri/ =404;
+                  }
+              
+                  location /api/ {
+                    proxy_pass http://{{app_server_dns_name}}/;
+                    include proxy_params;
+                  }
+                }
+              mode: "000644"
+              owner: "root"
+              group: "root"
           commands:
             update-awscli:
               command: /usr/bin/bash /home/ubuntu/update-awscli
@@ -271,6 +298,9 @@ Resources:
             apt-get autoremove -q -y
             apt-get install -q -y wget unzip tar curl sed git
             
+            apt-get install -q -y python3-certbot-nginx
+            apt-get install -q -y nginx-full
+            
             mkdir -p /tmp/cfn
             cd /tmp/cfn
             
@@ -304,12 +334,17 @@ Resources:
               curl -s -L -O https://s3.${AWS::Region}.amazonaws.com/amazoncloudwatch-agent-${AWS::Region}/ubuntu/arm64/latest/amazon-cloudwatch-agent.deb
             fi
             apt-get install -q -y ./amazon-cloudwatch-agent.deb
-  
+            
             /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json -s
+            systemctl daemon-reload
             systemctl enable amazon-cloudwatch-agent
             systemctl start amazon-cloudwatch-agent
             
-            echo "<h1>Hello World!</h1>" > /var/www/html/index.html
+            systemctl enable nginx
+            systemctl restart nginx
+            
+            mkdir -p /mnt/s3-bucket-mount/html
+            echo "<html>Hello World<html>" > /mnt/s3-bucket-mount/html/index.html
             
             # enable back IPv6
             sysctl -w net.ipv6.conf.all.disable_ipv6=0
@@ -327,11 +362,15 @@ Resources:
         - TopicARN: {{email_notification_topic}}
           NotificationTypes: [ 'autoscaling:EC2_INSTANCE_LAUNCH', 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR', 'autoscaling:EC2_INSTANCE_TERMINATE', 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR' ]
       TargetGroupARNs:
-        - !Ref EC2TargetGroupHTTP
-        - !Ref EC2TargetGroupHTTPS
+        - !Ref WebAppEC2TargetGroupHTTP
+        - !Ref WebAppEC2TargetGroupHTTPS
       VPCZoneIdentifier: {{webtier_subnets}}
+      Tags:
+        - Key: Name
+          Value: !Ref "AWS::StackName"
+          PropagateAtLaunch: true
 
-  EC2TargetGroupHTTP:
+  WebAppEC2TargetGroupHTTP:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 30
@@ -340,7 +379,7 @@ Resources:
       HealthyThresholdCount: 5
       Matcher:
         HttpCode: '200'
-      Name: EC2TargetGroupHTTP
+      Name: WebAppEC2TargetGroupHTTP
       Port: 80
       Protocol: HTTP
       TargetGroupAttributes:
@@ -348,7 +387,7 @@ Resources:
           Value: '20'
       UnhealthyThresholdCount: 3
       VpcId: {{vpc_id}}
-  EC2TargetGroupHTTPS:
+  WebAppEC2TargetGroupHTTPS:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 30
@@ -357,7 +396,7 @@ Resources:
       HealthyThresholdCount: 5
       Matcher:
         HttpCode: '200'
-      Name: EC2TargetGroupHTTPS
+      Name: WebAppEC2TargetGroupHTTPS
       Port: 443
       Protocol: HTTP
       TargetGroupAttributes:
@@ -377,7 +416,7 @@ Resources:
     Properties:
       DefaultActions:
         - Type: forward
-          TargetGroupArn: !Ref EC2TargetGroupHTTP
+          TargetGroupArn: !Ref WebAppEC2TargetGroupHTTP
       LoadBalancerArn: !Ref ApplicationLoadBalancer
       Port: 80
       Protocol: HTTP
@@ -386,11 +425,116 @@ Resources:
 #    Properties:
 #      DefaultActions:
 #        - Type: forward
-#          TargetGroupArn: !Ref EC2TargetGroupHTTPS
+#          TargetGroupArn: !Ref WebAppEC2TargetGroupHTTPS
 #      LoadBalancerArn: !Ref ApplicationLoadBalancer
 #      Port: 443
 #      Protocol: HTTPS
-
+  WebServerWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Description: Web ACL for Application Load Balancer of webapp and appserver
+      Name: !Ref "AWS::StackName"
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: AWS-CRS
+          Priority: 0
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              ExcludedRules: [ ]
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName:
+              Fn::Sub: "${AWS::StackName}-aws-crs-metric"
+        - Name: Bad-Inputs
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+              ExcludedRules: [ ]
+          OverrideAction:
+            None: { }
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName:
+              Fn::Sub: "${AWS::StackName}-bad-inputs-metric"
+        - Name: Anonymous-IpList
+          Priority: 2
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAnonymousIpList
+              ExcludedRules: [ ]
+          OverrideAction:
+            None: { }
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName:
+              Fn::Sub: "${AWS::StackName}-anonymous-iplist-metric"
+        - Name: IPReputation-IpList
+          Priority: 3
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+              ExcludedRules: [ ]
+          OverrideAction:
+            None: { }
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName:
+              Fn::Sub: "${AWS::StackName}-ip-reputation-list-metric"
+        - Name: Linux-Operating-System
+          Priority: 4
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesUnixRuleSet
+              ExcludedRules: [ ]
+          OverrideAction:
+            None: { }
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName:
+              Fn::Sub: "${AWS::StackName}-linux-os"
+        - Name: SQLInject-RuleSet
+          Priority: 5
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          OverrideAction:
+            None: { }
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName:
+              Fn::Sub: "${AWS::StackName}-SQLinjection-ruleset-metric"
+      Scope: REGIONAL
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName} App Web ACL"
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName:
+          Fn::Sub: "${AWS::StackName}-web-owasp-metric"
+  WebAppAlbWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref "ApplicationLoadBalancer"
+      WebACLArn: !GetAtt WebServerWebAcl.Arn
 Outputs:
   Sample:
     Description: Sample

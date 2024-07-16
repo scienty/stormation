@@ -7,6 +7,16 @@ key_pair_name: $Security.Outputs.KeyPairworkload
 elb_security_group: $Security.Outputs.SecurityGroupappElb
 app_server_security_group: $Security.Outputs.SecurityGroupprivate
 email_notification_topic: $Common.Outputs.EmailNotificationTopic
+
+aurora_postgres_host: $Database.Outputs.AuroraPostgresClusterEndpoint
+aurora_postgres_reader_host: $Database.Outputs.AuroraPostgresReaderEndpoint
+aurora_postgres_port: $Database.Outputs.AuroraPostgresPort
+aurora_postgres_db_name: $Database.Outputs.AuroraPostgresDBName
+
+rds_secret_arn: $Database.Outputs.RDSMasterSecretArn
+rds_secret_username: $Database.Outputs.RDSDBUsername
+rds_secret_password: $Database.Outputs.RDSDBPassword
+
 ---
 
 AWSTemplateFormatVersion: '2010-09-09'
@@ -65,6 +75,32 @@ Resources:
               mode: "000755"
               owner: "ubuntu"
               group: "ubuntu"
+            "/etc/systemd/system/sample-rds-app.service":
+              content: |
+                [Unit]
+                Description=Sample rest application to interact with RDS
+                After=multi-user.target
+
+                [Service]
+                Type=simple
+                Restart=always
+                RestartSec=5
+                User=ubuntu
+                Group=ubuntu
+                WorkingDirectory=/home/ubuntu/sample-rds-app
+                ExecStart=/usr/bin/python3 /home/ubuntu/sample-rds-app/main.py
+                Environment="RDS_SECRETMANAGER_ARN={{rds_secret_arn}}"
+                Environment="RDS_DB_USERNAME={{rds_secret_username}}"
+                Environment="RDS_DB_PASSWORD={{rds_secret_password}}"
+                Environment="AURORA_POSTGRESQL_HOST={{aurora_postgres_host}}"
+                Environment="AURORA_POSTGRESQL_PORT={{aurora_postgres_port}}"
+                Environment="AURORA_POSTGRESQL_DATABASE={{aurora_postgres_db_name}}"
+
+                [Install]
+                WantedBy=remote-fs.target
+              mode: "000644"
+              owner: "root"
+              group: "root"
             "/opt/aws/amazon-cloudwatch-agent/bin/config.json":
               content: |
                 {
@@ -141,6 +177,11 @@ Resources:
           commands:
             update-awscli:
               command: /usr/bin/bash /home/ubuntu/update-awscli
+          services:
+            systemd:
+              sample-rds-app:
+                enabled: "true"
+                ensureRunning: "true"
 
     Properties:
       LaunchTemplateName: {{stack_name|lower}}-launch-template
@@ -155,7 +196,7 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
-            
+          
             # disable IPv6 during setup
             sysctl -w net.ipv6.conf.all.disable_ipv6=1
             sysctl -w net.ipv6.conf.default.disable_ipv6=1
@@ -208,17 +249,20 @@ Resources:
             apt-get install -q -y ./amazon-cloudwatch-agent.deb
   
             /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json -s
+            systemctl daemon-reload
             systemctl enable amazon-cloudwatch-agent
             systemctl start amazon-cloudwatch-agent
             
-            echo "<h1>Hello World!</h1>" > /var/www/html/index.html
             
-            pip install aws-secretsmanager-caching
+            #install sample app
+            cd /home/ubuntu
+            git clone https://github.com/scienty/sample-rds-app.git
+            cd sample-rds-app
+            pip install -r requirements.txt
             
             # enable back IPv6
             sysctl -w net.ipv6.conf.all.disable_ipv6=0
             sysctl -w net.ipv6.conf.default.disable_ipv6=0
-
   AppServerAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -231,17 +275,21 @@ Resources:
         - TopicARN: {{email_notification_topic}}
           NotificationTypes: [ 'autoscaling:EC2_INSTANCE_LAUNCH', 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR', 'autoscaling:EC2_INSTANCE_TERMINATE', 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR' ]
       TargetGroupARNs:
-        - !Ref EC2TargetGroupHTTP
+        - !Ref AppServerEC2TargetGroupHTTP
       VPCZoneIdentifier: {{private_subnets}}
+      Tags:
+        - Key: Name
+          Value: !Ref "AWS::StackName"
+          PropagateAtLaunch: true
 
-  EC2TargetGroupHTTP:
+  AppServerEC2TargetGroupHTTP:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 30
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 15
       HealthyThresholdCount: 5
-      Name: EC2TargetGroupHTTP
+      Name: AppServerEC2TargetGroupHTTP
       Port: 80
       Protocol: TCP
       TargetGroupAttributes:
@@ -254,7 +302,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Type: 'network'
-      Scheme: internet-facing
+      Scheme: internal
       Subnets: {{private_subnets}}
       SecurityGroups:
         - {{elb_security_group}}
@@ -263,12 +311,15 @@ Resources:
     Properties:
       DefaultActions:
         - Type: forward
-          TargetGroupArn: !Ref EC2TargetGroupHTTP
+          TargetGroupArn: !Ref AppServerEC2TargetGroupHTTP
       LoadBalancerArn: !Ref AppNetworkLoadBalancer
       Port: 80
       Protocol: TCP
 
 Outputs:
   AppLoadBalancer:
-    Description: App Network Load Balancer
+    Description: App Network Load Balancer ARN
     Value: !Ref AppNetworkLoadBalancer
+  AppLoadBalancerDNSName:
+    Description: App Network Load Balancer DNS Name
+    Value: !GetAtt AppNetworkLoadBalancer.DNSName

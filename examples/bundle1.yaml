@@ -46,32 +46,32 @@ stacks:
       environment: topo-test
 
   Security:
-    enabled: false
+    enabled: true
     template: security.yaml
     dependson: [Network]
 
   Mgmt:
-    enabled: false
+    enabled: true
     template: mgmt.yaml
     dependson: [Network, Security]
     tags:
       SubnetType: management
 
   Database:
-    enabled: false
+    enabled: true
     template: database.yaml
     dependson: [Common, Network, Security]
 
   AppServer:
-    enabled: false
+    enabled: true
     template: appserver.yaml
     dependson: [ Database, Common, Network, Security ]
     tags:
       SubnetType: private
 
   WebServer:
-    enabled: false
+    enabled: true
     template: webserver.yaml
-    dependson: [ Common, Network, Security, WebServer ]
+    dependson: [ Common, Network, Security, AppServer ]
     tags:
       SubnetType: public
